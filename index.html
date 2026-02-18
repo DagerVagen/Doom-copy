@@ -1,0 +1,889 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milk Maze</title>
+  <style>
+    :root {
+      --bg: #0d0f13;
+      --panel: #171b22;
+      --text: #f2f2f2;
+      --accent: #7dd3fc;
+      --warn: #fb7185;
+      --ok: #86efac;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 25% 15%, #111827, #05070b 65%);
+      color: var(--text);
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      display: block;
+    }
+
+    canvas {
+      width: 100vw;
+      height: 100vh;
+      border: 0;
+      border-radius: 0;
+      background: #000;
+      image-rendering: pixelated;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="1280" height="720"></canvas>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    const worldW = 56;
+    const worldH = 56;
+    const fov = Math.PI / 3;
+    const rayCount = 320;
+    const maxDist = 34;
+    const moveSpeed = 2.8;
+    const mouseSensitivity = 0.00065;
+    const enemySpeed = 0.9;
+    const enemyWanderSpeed = 0.45;
+    const enemyAggroRange = 6.5;
+    const targetEnemyCount = 20;
+    const targetMilkCount = 22;
+    const targetAmmoCrateCount = 14;
+    const lifestealRatio = 0.32;
+
+    const keys = new Set();
+    let gameState = "playing";
+
+    const player = {
+      x: 1.5,
+      y: 1.5,
+      a: 0,
+      maxHp: 100,
+      hp: 100,
+      maxAmmo: 64,
+      ammo: 24,
+      shootCooldown: 0,
+      muzzleFlash: 0
+    };
+
+    const milks = [];
+    const ammoCrates = [];
+    const enemies = [];
+    const bullets = [];
+    let floorTiles = [];
+    let wallGrid = [];
+    let rooms = [];
+    let totalMilk = 0;
+
+    function randInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function rectsOverlap(a, b, margin = 1) {
+      return !(
+        a.x + a.w + margin <= b.x ||
+        b.x + b.w + margin <= a.x ||
+        a.y + a.h + margin <= b.y ||
+        b.y + b.h + margin <= a.y
+      );
+    }
+
+    function carveRect(x, y, w, h, val = 0) {
+      for (let yy = y; yy < y + h; yy++) {
+        for (let xx = x; xx < x + w; xx++) {
+          if (xx > 0 && yy > 0 && xx < worldW - 1 && yy < worldH - 1) {
+            wallGrid[yy][xx] = val;
+          }
+        }
+      }
+    }
+
+    function carveCorridor(x1, y1, x2, y2, width = 2) {
+      const horizontalFirst = Math.random() < 0.5;
+      if (horizontalFirst) {
+        const sx = Math.min(x1, x2);
+        carveRect(sx, y1 - Math.floor(width / 2), Math.abs(x2 - x1) + 1, width, 0);
+        const sy = Math.min(y1, y2);
+        carveRect(x2 - Math.floor(width / 2), sy, width, Math.abs(y2 - y1) + 1, 0);
+      } else {
+        const sy = Math.min(y1, y2);
+        carveRect(x1 - Math.floor(width / 2), sy, width, Math.abs(y2 - y1) + 1, 0);
+        const sx = Math.min(x1, x2);
+        carveRect(sx, y2 - Math.floor(width / 2), Math.abs(x2 - x1) + 1, width, 0);
+      }
+    }
+
+    function addRoomPillars(room) {
+      if (room.w < 9 || room.h < 9) return;
+      for (let py = room.y + 2; py < room.y + room.h - 2; py += 3) {
+        for (let px = room.x + 2; px < room.x + room.w - 2; px += 3) {
+          if (Math.abs(px - room.cx) <= 1 && Math.abs(py - room.cy) <= 1) continue;
+          wallGrid[py][px] = 1;
+        }
+      }
+    }
+
+    function generateRandomMap() {
+      wallGrid = Array.from({ length: worldH }, () => Array(worldW).fill(1));
+      rooms = [];
+
+      for (let i = 0; i < 280 && rooms.length < 24; i++) {
+        const rw = randInt(6, 13);
+        const rh = randInt(6, 12);
+        const rx = randInt(1, worldW - rw - 2);
+        const ry = randInt(1, worldH - rh - 2);
+        const room = {
+          x: rx,
+          y: ry,
+          w: rw,
+          h: rh,
+          cx: rx + Math.floor(rw / 2),
+          cy: ry + Math.floor(rh / 2)
+        };
+        if (rooms.some(r => rectsOverlap(room, r, 2))) continue;
+        carveRect(room.x, room.y, room.w, room.h, 0);
+        rooms.push(room);
+      }
+
+      for (let i = 1; i < rooms.length; i++) {
+        const a = rooms[i - 1];
+        const b = rooms[i];
+        carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(2, 3));
+      }
+
+      for (let i = 0; i < 10 && rooms.length > 2; i++) {
+        const a = rooms[randInt(0, rooms.length - 1)];
+        const b = rooms[randInt(0, rooms.length - 1)];
+        if (a !== b) carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(2, 3));
+      }
+
+      if (rooms.length === 0) {
+        const fallback = { x: 4, y: 4, w: 10, h: 10, cx: 9, cy: 9 };
+        carveRect(fallback.x, fallback.y, fallback.w, fallback.h, 0);
+        rooms.push(fallback);
+      }
+
+      for (const room of rooms) addRoomPillars(room);
+
+      floorTiles = [];
+      for (let y = 0; y < worldH; y++) {
+        for (let x = 0; x < worldW; x++) {
+          if (wallGrid[y][x] === 0) floorTiles.push({ x: x + 0.5, y: y + 0.5 });
+        }
+      }
+
+      const start = rooms[0] || { cx: 2, cy: 2 };
+      player.x = start.cx + 0.5;
+      player.y = start.cy + 0.5;
+      player.a = -Math.PI / 2;
+    }
+
+    function createEnemy(x, y) {
+      return {
+        x,
+        y,
+        hp: 40,
+        hurt: 0,
+        wanderAngle: Math.random() * Math.PI * 2,
+        wanderTimer: 0.6 + Math.random() * 1.6
+      };
+    }
+
+    function spawnEntities() {
+      milks.length = 0;
+      ammoCrates.length = 0;
+      enemies.length = 0;
+      bullets.length = 0;
+
+      let spawnAttempts = 0;
+      while (enemies.length < targetEnemyCount && spawnAttempts < 5000) {
+        spawnAttempts += 1;
+        const tile = floorTiles[randInt(0, floorTiles.length - 1)];
+        if (!tile) break;
+        if (Math.hypot(tile.x - player.x, tile.y - player.y) < 6.5) continue;
+        if (enemies.some(e => Math.hypot(tile.x - e.x, tile.y - e.y) < 1.6)) continue;
+        enemies.push(createEnemy(tile.x, tile.y));
+      }
+
+      spawnAttempts = 0;
+      while (milks.length < targetMilkCount && spawnAttempts < 5000) {
+        spawnAttempts += 1;
+        const tile = floorTiles[randInt(0, floorTiles.length - 1)];
+        if (!tile) break;
+        if (Math.hypot(tile.x - player.x, tile.y - player.y) < 4.8) continue;
+        if (milks.some(m => Math.hypot(tile.x - m.x, tile.y - m.y) < 1.5)) continue;
+        if (enemies.some(e => Math.hypot(tile.x - e.x, tile.y - e.y) < 1.1)) continue;
+        milks.push({ x: tile.x, y: tile.y, taken: false });
+      }
+
+      spawnAttempts = 0;
+      while (ammoCrates.length < targetAmmoCrateCount && spawnAttempts < 5000) {
+        spawnAttempts += 1;
+        const tile = floorTiles[randInt(0, floorTiles.length - 1)];
+        if (!tile) break;
+        if (Math.hypot(tile.x - player.x, tile.y - player.y) < 3.6) continue;
+        if (milks.some(m => Math.hypot(tile.x - m.x, tile.y - m.y) < 1.0)) continue;
+        if (ammoCrates.some(a => Math.hypot(tile.x - a.x, tile.y - a.y) < 1.5)) continue;
+        ammoCrates.push({
+          x: tile.x,
+          y: tile.y,
+          amount: randInt(7, 14),
+          taken: false
+        });
+      }
+
+      player.hp = player.maxHp;
+      player.ammo = 24;
+      totalMilk = milks.length;
+      gameState = "playing";
+    }
+
+    generateRandomMap();
+    spawnEntities();
+
+    function isWall(x, y) {
+      const tx = Math.floor(x);
+      const ty = Math.floor(y);
+      if (tx < 0 || ty < 0 || tx >= worldW || ty >= worldH) return true;
+      return wallGrid[ty][tx] === 1;
+    }
+
+    function canMove(x, y, r = 0.22) {
+      return !isWall(x - r, y - r) &&
+             !isWall(x + r, y - r) &&
+             !isWall(x - r, y + r) &&
+             !isWall(x + r, y + r);
+    }
+
+    function raycast(ox, oy, angle) {
+      const step = 0.02;
+      let dist = 0;
+      while (dist < maxDist) {
+        const x = ox + Math.cos(angle) * dist;
+        const y = oy + Math.sin(angle) * dist;
+        if (isWall(x, y)) {
+          return {
+            dist,
+            hitX: x,
+            hitY: y,
+            cellX: Math.floor(x),
+            cellY: Math.floor(y)
+          };
+        }
+        dist += step;
+      }
+      return {
+        dist: maxDist,
+        hitX: ox + Math.cos(angle) * maxDist,
+        hitY: oy + Math.sin(angle) * maxDist,
+        cellX: -1,
+        cellY: -1
+      };
+    }
+
+    function update(dt) {
+      if (gameState !== "playing") return;
+
+      let forward = 0;
+      let strafe = 0;
+      if (keys.has("w")) forward += 1;
+      if (keys.has("s")) forward -= 1;
+      if (keys.has("a")) strafe -= 1;
+      if (keys.has("d")) strafe += 1;
+      const dx = (Math.cos(player.a) * forward + Math.cos(player.a + Math.PI / 2) * strafe) * moveSpeed * dt;
+      const dy = (Math.sin(player.a) * forward + Math.sin(player.a + Math.PI / 2) * strafe) * moveSpeed * dt;
+
+      const nx = player.x + dx;
+      const ny = player.y + dy;
+      if (canMove(nx, player.y)) player.x = nx;
+      if (canMove(player.x, ny)) player.y = ny;
+
+      player.shootCooldown = Math.max(0, player.shootCooldown - dt);
+      player.muzzleFlash = Math.max(0, player.muzzleFlash - dt);
+
+      for (const m of milks) {
+        if (!m.taken) {
+          const d = Math.hypot(m.x - player.x, m.y - player.y);
+          if (d < 0.45) m.taken = true;
+        }
+      }
+      for (const crate of ammoCrates) {
+        if (!crate.taken) {
+          const d = Math.hypot(crate.x - player.x, crate.y - player.y);
+          if (d < 0.5) {
+            crate.taken = true;
+            player.ammo = Math.min(player.maxAmmo, player.ammo + crate.amount);
+          }
+        }
+      }
+
+      for (const e of enemies) {
+        if (e.hp <= 0) continue;
+        e.hurt = Math.max(0, e.hurt - dt * 2);
+
+        const vx = player.x - e.x;
+        const vy = player.y - e.y;
+        const d = Math.hypot(vx, vy);
+
+        if (d <= enemyAggroRange && d > 0.7) {
+          const ex = e.x + (vx / d) * enemySpeed * dt;
+          const ey = e.y + (vy / d) * enemySpeed * dt;
+          if (canMove(ex, e.y, 0.2)) e.x = ex;
+          else e.wanderAngle = Math.random() * Math.PI * 2;
+          if (canMove(e.x, ey, 0.2)) e.y = ey;
+          else e.wanderAngle = Math.random() * Math.PI * 2;
+        } else if (d <= 0.7) {
+          player.hp -= 20 * dt;
+        } else {
+          e.wanderTimer -= dt;
+          if (e.wanderTimer <= 0) {
+            e.wanderAngle = Math.random() * Math.PI * 2;
+            e.wanderTimer = 0.7 + Math.random() * 2.1;
+          }
+          e.wanderAngle += (Math.random() - 0.5) * 0.9 * dt;
+          const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * dt;
+          const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * dt;
+          if (canMove(ex, e.y, 0.2)) e.x = ex;
+          else e.wanderAngle += Math.PI * (0.4 + Math.random() * 0.3);
+          if (canMove(e.x, ey, 0.2)) e.y = ey;
+          else e.wanderAngle -= Math.PI * (0.3 + Math.random() * 0.35);
+        }
+      }
+
+      for (const b of bullets) {
+        b.life -= dt;
+        b.x += Math.cos(b.a) * b.speed * dt;
+        b.y += Math.sin(b.a) * b.speed * dt;
+        if (isWall(b.x, b.y)) b.life = -1;
+        for (const e of enemies) {
+          if (e.hp <= 0) continue;
+          if (Math.hypot(e.x - b.x, e.y - b.y) < 0.32) {
+            const hitDamage = Math.min(25, e.hp);
+            e.hp -= 25;
+            e.hurt = 1;
+            player.hp = Math.min(player.maxHp, player.hp + hitDamage * lifestealRatio);
+            b.life = -1;
+            break;
+          }
+        }
+      }
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        if (bullets[i].life <= 0) bullets.splice(i, 1);
+      }
+
+      player.hp = Math.max(0, player.hp);
+      if (player.hp <= 0) gameState = "lost";
+      const collected = milks.filter(m => m.taken).length;
+      if (collected === totalMilk) gameState = "won";
+    }
+
+    function drawBackground() {
+      const w = canvas.width;
+      const h = canvas.height;
+      const roof = ctx.createLinearGradient(0, 0, 0, h / 2);
+      roof.addColorStop(0, "#4b2f1c");
+      roof.addColorStop(1, "#2f1a0f");
+      ctx.fillStyle = roof;
+      ctx.fillRect(0, 0, w, h / 2);
+      const plankW = Math.max(28, w / 26);
+      for (let x = 0; x < w; x += plankW) {
+        const tint = ((Math.floor(x / plankW) % 2) === 0) ? 1.08 : 0.88;
+        const r = Math.max(0, Math.min(255, (70 * tint) | 0));
+        const g = Math.max(0, Math.min(255, (42 * tint) | 0));
+        const b = Math.max(0, Math.min(255, (25 * tint) | 0));
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(x, 0, plankW - 2, h / 2);
+      }
+      ctx.fillStyle = "rgba(20, 10, 6, 0.35)";
+      for (let y = 14; y < h / 2; y += 26) {
+        ctx.fillRect(0, y, w, 2);
+      }
+
+      const floor = ctx.createLinearGradient(0, h / 2, 0, h);
+      floor.addColorStop(0, "#171717");
+      floor.addColorStop(1, "#050505");
+      ctx.fillStyle = floor;
+      ctx.fillRect(0, h / 2, w, h / 2);
+    }
+
+    function drawWorld() {
+      const w = canvas.width;
+      const h = canvas.height;
+      const zBuffer = new Array(rayCount).fill(maxDist);
+
+      for (let i = 0; i < rayCount; i++) {
+        const t = i / rayCount;
+        const angle = player.a - fov / 2 + t * fov;
+        const hit = raycast(player.x, player.y, angle);
+        const dist = hit.dist * Math.cos(angle - player.a);
+        zBuffer[i] = dist;
+        const wallH = Math.min(h, (h * 0.85) / Math.max(0.001, dist));
+        const x = (i / rayCount) * w;
+        const bw = w / rayCount + 1;
+        const top = (h - wallH) / 2;
+
+        const fracX = hit.hitX - Math.floor(hit.hitX);
+        const fracY = hit.hitY - Math.floor(hit.hitY);
+        const texU = Math.abs(fracX - 0.5) > Math.abs(fracY - 0.5) ? fracY : fracX;
+        const section = ((Math.floor(hit.cellX / 4) + Math.floor(hit.cellY / 4)) % 3 + 3) % 3;
+        const baseBrick = [
+          [92, 82, 74],
+          [84, 78, 72],
+          [100, 88, 78]
+        ][section];
+        const distShade = Math.max(0.18, 1 - dist * 0.06);
+        const brickAlt = (Math.floor((texU + (hit.cellY % 2 ? 0.2 : 0)) * 8) % 2 === 0) ? 1.05 : 0.85;
+
+        let r = baseBrick[0] * distShade * brickAlt;
+        let g = baseBrick[1] * distShade * brickAlt;
+        let b = baseBrick[2] * distShade * brickAlt;
+        ctx.fillStyle = `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
+        ctx.fillRect(x, top, bw, wallH);
+
+        ctx.fillStyle = "rgba(32, 24, 20, 0.45)";
+        for (let row = 1; row <= 5; row++) {
+          const mortarY = top + (row / 6) * wallH + ((hit.cellX + hit.cellY + row) % 2);
+          ctx.fillRect(x, mortarY, bw, Math.max(1, wallH * 0.01));
+        }
+        const joints = [0, 0.25, 0.5, 0.75, 1];
+        if (joints.some(j => Math.abs(texU - j) < 0.028)) {
+          ctx.fillStyle = "rgba(28, 22, 18, 0.55)";
+          ctx.fillRect(x, top, bw, wallH);
+        }
+      }
+
+      const sprites = [];
+      for (const m of milks) {
+        if (!m.taken) sprites.push({ ...m, type: "milk" });
+      }
+      for (const a of ammoCrates) {
+        if (!a.taken) sprites.push({ ...a, type: "ammo" });
+      }
+      for (const e of enemies) {
+        if (e.hp > 0) sprites.push({ ...e, type: "enemy", hurt: e.hurt });
+      }
+
+      sprites.sort((a, b) => {
+        const da = Math.hypot(a.x - player.x, a.y - player.y);
+        const db = Math.hypot(b.x - player.x, b.y - player.y);
+        return db - da;
+      });
+
+      for (const s of sprites) {
+        const dx = s.x - player.x;
+        const dy = s.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        const angle = Math.atan2(dy, dx) - player.a;
+        const wrapped = Math.atan2(Math.sin(angle), Math.cos(angle));
+        if (Math.abs(wrapped) > fov * 0.6) continue;
+
+        const screenX = (wrapped / fov + 0.5) * w;
+        const spriteScale = s.type === "enemy" ? 0.55 : s.type === "ammo" ? 0.34 : 0.40;
+        const size = Math.min(h * 0.9, (h * spriteScale) / Math.max(dist, 0.1));
+        const left = screenX - size / 2;
+        const top = h / 2 - size / 2;
+        const rayIndex = Math.floor((screenX / w) * rayCount);
+        if (rayIndex < 0 || rayIndex >= rayCount || dist > zBuffer[rayIndex]) continue;
+
+        if (s.type === "milk") drawMilkSprite(left, top, size);
+        else if (s.type === "ammo") drawAmmoCrateSprite(left, top, size);
+        else drawEnemySprite(left, top, size, s.hurt);
+      }
+
+      ctx.strokeStyle = "#cbd5e1";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(w / 2 - 10, h / 2);
+      ctx.lineTo(w / 2 + 10, h / 2);
+      ctx.moveTo(w / 2, h / 2 - 10);
+      ctx.lineTo(w / 2, h / 2 + 10);
+      ctx.stroke();
+    }
+
+    function drawMilkSprite(left, top, size) {
+      const frontX = left + size * 0.08;
+      const frontY = top + size * 0.10;
+      const frontW = size * 0.58;
+      const frontH = size * 0.84;
+      const depth = size * 0.20;
+      const topLift = size * 0.12;
+
+      ctx.fillStyle = "#8ea6bf";
+      ctx.beginPath();
+      ctx.moveTo(frontX, frontY);
+      ctx.lineTo(frontX + depth, frontY - topLift);
+      ctx.lineTo(frontX + depth + frontW, frontY - topLift);
+      ctx.lineTo(frontX + frontW, frontY);
+      ctx.closePath();
+      ctx.fill();
+
+      const frontGrad = ctx.createLinearGradient(frontX, frontY, frontX, frontY + frontH);
+      frontGrad.addColorStop(0, "#edf1f5");
+      frontGrad.addColorStop(0.58, "#cfd8e2");
+      frontGrad.addColorStop(1, "#9da9b8");
+      ctx.fillStyle = frontGrad;
+      ctx.fillRect(frontX, frontY, frontW, frontH);
+
+      const sideGrad = ctx.createLinearGradient(frontX + frontW, frontY, frontX + frontW + depth, frontY + frontH);
+      sideGrad.addColorStop(0, "#7a8ea4");
+      sideGrad.addColorStop(1, "#4f647b");
+      ctx.fillStyle = sideGrad;
+      ctx.beginPath();
+      ctx.moveTo(frontX + frontW, frontY);
+      ctx.lineTo(frontX + frontW + depth, frontY - topLift);
+      ctx.lineTo(frontX + frontW + depth, frontY + frontH - topLift);
+      ctx.lineTo(frontX + frontW, frontY + frontH);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#465a71";
+      ctx.fillRect(frontX + frontW * 0.16, frontY + frontH * 0.22, frontW * 0.66, frontH * 0.46);
+      ctx.fillStyle = "#b6c3d0";
+      ctx.fillRect(frontX + frontW * 0.24, frontY + frontH * 0.30, frontW * 0.22, frontH * 0.12);
+
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.82)";
+      ctx.lineWidth = Math.max(1.2, size * 0.02);
+      ctx.strokeRect(frontX, frontY, frontW, frontH);
+      ctx.beginPath();
+      ctx.moveTo(frontX + frontW, frontY);
+      ctx.lineTo(frontX + frontW + depth, frontY - topLift);
+      ctx.lineTo(frontX + frontW + depth, frontY + frontH - topLift);
+      ctx.lineTo(frontX + frontW, frontY + frontH);
+      ctx.stroke();
+    }
+
+    function drawAmmoCrateSprite(left, top, size) {
+      const cx = left + size * 0.12;
+      const cy = top + size * 0.18;
+      const cw = size * 0.58;
+      const ch = size * 0.58;
+      const d = size * 0.20;
+      const rise = size * 0.12;
+
+      ctx.fillStyle = "#b45309";
+      ctx.fillRect(cx, cy, cw, ch);
+
+      ctx.fillStyle = "#d97706";
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + d, cy - rise);
+      ctx.lineTo(cx + d + cw, cy - rise);
+      ctx.lineTo(cx + cw, cy);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#92400e";
+      ctx.beginPath();
+      ctx.moveTo(cx + cw, cy);
+      ctx.lineTo(cx + cw + d, cy - rise);
+      ctx.lineTo(cx + cw + d, cy + ch - rise);
+      ctx.lineTo(cx + cw, cy + ch);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#fde68a";
+      ctx.fillRect(cx + cw * 0.30, cy + ch * 0.20, cw * 0.40, ch * 0.50);
+      ctx.fillStyle = "#78350f";
+      ctx.fillRect(cx + cw * 0.43, cy + ch * 0.26, cw * 0.14, ch * 0.38);
+      ctx.fillRect(cx + cw * 0.34, cy + ch * 0.37, cw * 0.32, ch * 0.14);
+
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.82)";
+      ctx.lineWidth = Math.max(1.1, size * 0.019);
+      ctx.strokeRect(cx, cy, cw, ch);
+    }
+
+    function drawEnemySprite(left, top, size, hurt) {
+      const bodyW = size * 0.82;
+      const bodyH = size;
+      const bodyX = left;
+      const bodyY = top;
+
+      const body = ctx.createLinearGradient(bodyX, bodyY, bodyX, bodyY + bodyH);
+      if (hurt > 0) {
+        body.addColorStop(0, "#c78186");
+        body.addColorStop(1, "#7f474b");
+      } else {
+        body.addColorStop(0, "#7c8e73");
+        body.addColorStop(1, "#4f5d48");
+      }
+      ctx.fillStyle = body;
+      ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
+
+      ctx.fillStyle = "#0f172a";
+      ctx.fillRect(bodyX + bodyW * 0.18, bodyY + bodyH * 0.22, bodyW * 0.18, bodyH * 0.14);
+      ctx.fillRect(bodyX + bodyW * 0.58, bodyY + bodyH * 0.22, bodyW * 0.18, bodyH * 0.14);
+      ctx.fillStyle = hurt > 0 ? "#f1e7e8" : "#e6eaee";
+      ctx.fillRect(bodyX + bodyW * 0.22, bodyY + bodyH * 0.26, bodyW * 0.08, bodyH * 0.05);
+      ctx.fillRect(bodyX + bodyW * 0.62, bodyY + bodyH * 0.26, bodyW * 0.08, bodyH * 0.05);
+
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(bodyX + bodyW * 0.28, bodyY + bodyH * 0.55, bodyW * 0.28, bodyH * 0.09);
+      ctx.fillStyle = "#c28e8f";
+      ctx.fillRect(bodyX + bodyW * 0.34, bodyY + bodyH * 0.58, bodyW * 0.16, bodyH * 0.03);
+
+      ctx.fillStyle = hurt > 0 ? "#a95d5d" : "#5c7155";
+      ctx.fillRect(bodyX - bodyW * 0.08, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
+      ctx.fillRect(bodyX + bodyW, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
+
+      ctx.strokeStyle = "rgba(3, 7, 18, 0.85)";
+      ctx.lineWidth = Math.max(1.3, size * 0.02);
+      ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
+    }
+
+    function drawWeapon(timeSec) {
+      const w = canvas.width;
+      const h = canvas.height;
+      const sway = Math.sin(timeSec * 4.4) * 4 + Math.cos(timeSec * 2.2) * 2;
+      const recoil = player.shootCooldown > 0 ? player.shootCooldown * 28 : 0;
+      const gunW = w * 0.36;
+      const gunH = h * 0.25;
+      const gunX = w * 0.5 - gunW * 0.5 + sway;
+      const gunY = h - gunH + 24 + recoil;
+
+      const stock = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
+      stock.addColorStop(0, "#4a3628");
+      stock.addColorStop(1, "#2e2118");
+      ctx.fillStyle = stock;
+      ctx.fillRect(gunX + gunW * 0.08, gunY + gunH * 0.34, gunW * 0.22, gunH * 0.50);
+
+      const receiver = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
+      receiver.addColorStop(0, "#5f646a");
+      receiver.addColorStop(1, "#2d3136");
+      ctx.fillStyle = receiver;
+      ctx.fillRect(gunX + gunW * 0.24, gunY + gunH * 0.25, gunW * 0.52, gunH * 0.43);
+
+      const handGuard = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
+      handGuard.addColorStop(0, "#73797f");
+      handGuard.addColorStop(1, "#3d4247");
+      ctx.fillStyle = handGuard;
+      ctx.fillRect(gunX + gunW * 0.50, gunY + gunH * 0.16, gunW * 0.28, gunH * 0.18);
+
+      ctx.fillStyle = "#23272c";
+      ctx.fillRect(gunX + gunW * 0.56, gunY - gunH * 0.18, gunW * 0.12, gunH * 0.50);
+      ctx.fillStyle = "#181c20";
+      ctx.fillRect(gunX + gunW * 0.60, gunY - gunH * 0.24, gunW * 0.04, gunH * 0.08);
+
+      ctx.fillStyle = "#3f444a";
+      ctx.fillRect(gunX + gunW * 0.40, gunY + gunH * 0.08, gunW * 0.16, gunH * 0.09);
+      ctx.fillStyle = "#0f1216";
+      ctx.fillRect(gunX + gunW * 0.45, gunY + gunH * 0.05, gunW * 0.06, gunH * 0.03);
+
+      ctx.fillStyle = "#2d3238";
+      ctx.fillRect(gunX + gunW * 0.30, gunY + gunH * 0.56, gunW * 0.10, gunH * 0.36);
+      ctx.fillStyle = "#11151a";
+      ctx.fillRect(gunX + gunW * 0.315, gunY + gunH * 0.60, gunW * 0.07, gunH * 0.29);
+
+      ctx.strokeStyle = "rgba(208, 214, 221, 0.35)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(gunX + gunW * 0.24, gunY + gunH * 0.25, gunW * 0.52, gunH * 0.43);
+      ctx.strokeRect(gunX + gunW * 0.08, gunY + gunH * 0.34, gunW * 0.22, gunH * 0.50);
+
+      if (player.muzzleFlash > 0) {
+        const f = player.muzzleFlash / 0.12;
+        const fx = gunX + gunW * 0.62;
+        const fy = gunY - gunH * 0.20;
+        ctx.fillStyle = `rgba(240, 220, 150, ${0.36 * f})`;
+        ctx.beginPath();
+        ctx.moveTo(fx, fy - 18 * f);
+        ctx.lineTo(fx + 12 * f, fy + 2 * f);
+        ctx.lineTo(fx, fy + 9 * f);
+        ctx.lineTo(fx - 12 * f, fy + 2 * f);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    function drawMinimap() {
+      const cell = Math.max(3, Math.min(8, Math.floor(Math.min(canvas.width, canvas.height) / 130)));
+      const pad = 10;
+      const w = worldW * cell;
+      const h = worldH * cell;
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = "#0b1220";
+      ctx.fillRect(pad - 4, pad - 4, w + 8, h + 8);
+      ctx.globalAlpha = 1;
+
+      for (let y = 0; y < worldH; y++) {
+        for (let x = 0; x < worldW; x++) {
+          ctx.fillStyle = wallGrid[y][x] ? "#5d534b" : "#111317";
+          ctx.fillRect(pad + x * cell, pad + y * cell, cell - 1, cell - 1);
+        }
+      }
+      for (const m of milks) {
+        if (!m.taken) {
+          const mx = pad + m.x * cell;
+          const my = pad + m.y * cell;
+          ctx.fillStyle = "#60a5fa";
+          ctx.fillRect(mx - 1.8, my - 1.6, 3.6, 3.2);
+          ctx.fillStyle = "#e0f2fe";
+          ctx.fillRect(mx - 0.8, my - 0.7, 1.6, 1.4);
+        }
+      }
+      for (const crate of ammoCrates) {
+        if (!crate.taken) {
+          const cx = pad + crate.x * cell;
+          const cy = pad + crate.y * cell;
+          ctx.fillStyle = "#f59e0b";
+          ctx.fillRect(cx - 1.7, cy - 1.7, 3.4, 3.4);
+          ctx.fillStyle = "#78350f";
+          ctx.fillRect(cx - 0.55, cy - 1.2, 1.1, 2.4);
+          ctx.fillRect(cx - 1.2, cy - 0.55, 2.4, 1.1);
+        }
+      }
+      for (const e of enemies) {
+        if (e.hp > 0) {
+          const ex = pad + e.x * cell;
+          const ey = pad + e.y * cell;
+          ctx.fillStyle = "#ef4444";
+          ctx.beginPath();
+          ctx.arc(ex, ey, 2.4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#111827";
+          ctx.fillRect(ex - 1.2, ey - 1.2, 0.9, 0.9);
+          ctx.fillRect(ex + 0.3, ey - 1.2, 0.9, 0.9);
+        }
+      }
+      ctx.fillStyle = "#f8fafc";
+      ctx.beginPath();
+      ctx.arc(pad + player.x * cell, pad + player.y * cell, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#f8fafc";
+      ctx.beginPath();
+      ctx.moveTo(pad + player.x * cell, pad + player.y * cell);
+      ctx.lineTo(
+        pad + (player.x + Math.cos(player.a) * 1.2) * cell,
+        pad + (player.y + Math.sin(player.a) * 1.2) * cell
+      );
+      ctx.stroke();
+    }
+
+    function drawOverlay() {
+      if (gameState === "playing") return;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.58)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "bold 52px Trebuchet MS";
+      ctx.fillText(gameState === "won" ? "You got the milk!" : "You got shredded!", canvas.width / 2, canvas.height / 2 - 10);
+      ctx.font = "24px Trebuchet MS";
+      ctx.fillStyle = "#cbd5e1";
+      ctx.fillText("Refresh page to play again", canvas.width / 2, canvas.height / 2 + 36);
+    }
+
+    function drawStatBar(x, y, w, h, value, maxValue, color, label, icon) {
+      const p = maxValue <= 0 ? 0 : Math.max(0, Math.min(1, value / maxValue));
+      ctx.fillStyle = "rgba(10, 14, 22, 0.52)";
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = color;
+      ctx.fillRect(x + 2, y + 2, (w - 4) * p, h - 4);
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "bold 14px Trebuchet MS";
+      ctx.textAlign = "left";
+      ctx.fillText(`${icon} ${label}`, x + 8, y + 16);
+      ctx.textAlign = "right";
+      ctx.fillText(`${Math.round(value)}/${maxValue}`, x + w - 8, y + 16);
+    }
+
+    function drawHudBars() {
+      const collected = milks.filter(m => m.taken).length;
+      const aliveEnemies = enemies.filter(e => e.hp > 0).length;
+      const x = 16;
+      const w = Math.min(320, canvas.width * 0.34);
+      const h = 24;
+      const gap = 8;
+      const totalHudH = (h + gap) * 4 + 44;
+      const y = Math.max(12, canvas.height - totalHudH - 12);
+
+      drawStatBar(x, y, w, h, collected, totalMilk, "#3b82f6", "Milk", "🥛");
+      drawStatBar(x, y + (h + gap) * 1, w, h, player.hp, player.maxHp, "#ef4444", "Health", "❤️");
+      drawStatBar(x, y + (h + gap) * 2, w, h, player.ammo, player.maxAmmo, "#f59e0b", "Ammo", "🔫");
+      drawStatBar(x, y + (h + gap) * 3, w, h, aliveEnemies, targetEnemyCount, "#22c55e", "Enemies", "👾");
+
+      ctx.fillStyle = "rgba(10, 14, 22, 0.52)";
+      ctx.fillRect(x, y + (h + gap) * 4, w, 44);
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+      ctx.strokeRect(x, y + (h + gap) * 4, w, 44);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "bold 14px Trebuchet MS";
+      ctx.textAlign = "left";
+      const stateText = gameState === "playing" ? "Playing" : gameState === "won" ? "Won" : "Lost";
+      ctx.fillText(`🎮 State: ${stateText}`, x + 8, y + (h + gap) * 4 + 16);
+      ctx.fillText("⌨️ WASD move  🖱️ LMB shoot", x + 8, y + (h + gap) * 4 + 38);
+    }
+
+    function shoot() {
+      if (gameState !== "playing" || player.shootCooldown > 0 || player.ammo <= 0) return;
+      bullets.push({
+        x: player.x,
+        y: player.y,
+        a: player.a,
+        speed: 8.2,
+        life: 1.2
+      });
+      player.ammo -= 1;
+      player.shootCooldown = 0.25;
+      player.muzzleFlash = 0.12;
+    }
+
+    window.addEventListener("keydown", (e) => {
+      const key = e.key.toLowerCase();
+      keys.add(key);
+    });
+    window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+    canvas.addEventListener("click", () => {
+      if (document.pointerLockElement !== canvas) {
+        canvas.requestPointerLock();
+      }
+    });
+
+    window.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (document.pointerLockElement !== canvas) {
+        canvas.requestPointerLock();
+        return;
+      }
+      shoot();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (document.pointerLockElement !== canvas || gameState !== "playing") return;
+      player.a += e.movementX * mouseSensitivity;
+    });
+
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    let last = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.033, (now - last) / 1000);
+      last = now;
+      update(dt);
+      drawBackground();
+      drawWorld();
+      drawMinimap();
+      drawHudBars();
+      drawWeapon(now * 0.001);
+      drawOverlay();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
