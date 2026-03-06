@@ -60,12 +60,22 @@
     const enemySpeed = 0.9;
     const enemyWanderSpeed = 0.45;
     const enemyAggroRange = 6.5;
-    const targetEnemyCount = 20;
-    const targetMilkCount = 22;
-    const targetAmmoCrateCount = 14;
+    const baseEnemyCount = 14;
+    const baseMilkCount = 12;
+    const baseAmmoCrateCount = 10;
     const lifestealRatio = 0.32;
+    const weaponDefs = [
+      { id: "rifle", name: "Rifle", emoji: "🔫", ammoCost: 1, pellets: 1, spread: 0.005, cooldown: 0.19, damage: 28, speed: 9.2, life: 1.3, hitRadius: 0.30, muzzle: 0.10 },
+      { id: "smg", name: "SMG", emoji: "🧨", ammoCost: 1, pellets: 1, spread: 0.024, cooldown: 0.075, damage: 14, speed: 8.8, life: 1.05, hitRadius: 0.28, muzzle: 0.08 },
+      { id: "shotgun", name: "Shotgun", emoji: "💥", ammoCost: 2, pellets: 7, spread: 0.12, cooldown: 0.62, damage: 12, speed: 7.2, life: 0.78, hitRadius: 0.34, muzzle: 0.14 },
+      { id: "sniper", name: "Sniper", emoji: "🎯", ammoCost: 3, pellets: 1, spread: 0.0018, cooldown: 0.95, damage: 78, speed: 14.5, life: 1.9, hitRadius: 0.26, muzzle: 0.17 }
+    ];
 
     const keys = new Set();
+    let isMouseDown = false;
+    let dungeonLevel = 1;
+    let choosingSkill = false;
+    let gamePaused = false;
     let gameState = "playing";
 
     const player = {
@@ -76,6 +86,15 @@
       hp: 100,
       maxAmmo: 64,
       ammo: 24,
+      weaponIndex: 0,
+      fireRateMult: 1,
+      fireballCooldown: 0,
+      xp: 0,
+      xpLevel: 1,
+      xpToNext: 70,
+      hasFireballSkill: false,
+      hasRapidSkill: false,
+      hasToughSkill: false,
       shootCooldown: 0,
       muzzleFlash: 0
     };
@@ -84,6 +103,13 @@
     const ammoCrates = [];
     const enemies = [];
     const bullets = [];
+    const enemyProjectiles = [];
+    const stairs = { x: 0, y: 0, active: false };
+    const skillChoices = [
+      { id: "fireball", key: "1", label: "Fireball Cast", desc: "Press F to launch fireball" },
+      { id: "rapid", key: "2", label: "Rapid Trigger", desc: "20% faster weapon fire rate" },
+      { id: "tough", key: "3", label: "Hardened Body", desc: "20% more max HP immediately" }
+    ];
     let floorTiles = [];
     let wallGrid = [];
     let rooms = [];
@@ -192,14 +218,44 @@
       player.a = -Math.PI / 2;
     }
 
+    function difficultyScale() {
+      return 1 + (dungeonLevel - 1) * 0.24;
+    }
+
+    function levelEnemyTarget() {
+      return baseEnemyCount + dungeonLevel * 4;
+    }
+
+    function levelMilkTarget() {
+      return baseMilkCount + dungeonLevel * 3;
+    }
+
+    function levelAmmoTarget() {
+      return baseAmmoCrateCount + Math.floor(dungeonLevel * 1.5);
+    }
+
+    function pickEnemyKind() {
+      if (dungeonLevel <= 1) return "melee";
+      if (dungeonLevel === 2) return Math.random() < 0.38 ? "flame" : "melee";
+      const r = Math.random();
+      if (r < 0.30) return "lightning";
+      if (r < 0.62) return "flame";
+      return "melee";
+    }
+
     function createEnemy(x, y) {
+      const kind = pickEnemyKind();
+      const scale = difficultyScale();
+      const baseHp = kind === "lightning" ? 70 : kind === "flame" ? 55 : 46;
       return {
         x,
         y,
-        hp: 40,
+        kind,
+        hp: Math.round(baseHp * scale),
         hurt: 0,
         wanderAngle: Math.random() * Math.PI * 2,
-        wanderTimer: 0.6 + Math.random() * 1.6
+        wanderTimer: 0.6 + Math.random() * 1.6,
+        shootTimer: 0.7 + Math.random() * 1.4
       };
     }
 
@@ -208,9 +264,11 @@
       ammoCrates.length = 0;
       enemies.length = 0;
       bullets.length = 0;
+      enemyProjectiles.length = 0;
+      stairs.active = false;
 
       let spawnAttempts = 0;
-      while (enemies.length < targetEnemyCount && spawnAttempts < 5000) {
+      while (enemies.length < levelEnemyTarget() && spawnAttempts < 7000) {
         spawnAttempts += 1;
         const tile = floorTiles[randInt(0, floorTiles.length - 1)];
         if (!tile) break;
@@ -220,7 +278,7 @@
       }
 
       spawnAttempts = 0;
-      while (milks.length < targetMilkCount && spawnAttempts < 5000) {
+      while (milks.length < levelMilkTarget() && spawnAttempts < 7000) {
         spawnAttempts += 1;
         const tile = floorTiles[randInt(0, floorTiles.length - 1)];
         if (!tile) break;
@@ -231,7 +289,7 @@
       }
 
       spawnAttempts = 0;
-      while (ammoCrates.length < targetAmmoCrateCount && spawnAttempts < 5000) {
+      while (ammoCrates.length < levelAmmoTarget() && spawnAttempts < 7000) {
         spawnAttempts += 1;
         const tile = floorTiles[randInt(0, floorTiles.length - 1)];
         if (!tile) break;
@@ -246,14 +304,76 @@
         });
       }
 
-      player.hp = player.maxHp;
-      player.ammo = 24;
+      player.hp = Math.min(player.maxHp, player.hp + 24);
+      player.ammo = Math.min(player.maxAmmo, player.ammo + 24);
       totalMilk = milks.length;
       gameState = "playing";
     }
 
     generateRandomMap();
     spawnEntities();
+
+    function placeStairs() {
+      let attempts = 0;
+      while (attempts < 2500) {
+        attempts += 1;
+        const t = floorTiles[randInt(0, floorTiles.length - 1)];
+        if (!t) break;
+        if (Math.hypot(t.x - player.x, t.y - player.y) < 10) continue;
+        if (milks.some(m => !m.taken && Math.hypot(t.x - m.x, t.y - m.y) < 1.5)) continue;
+        if (enemies.some(e => e.hp > 0 && Math.hypot(t.x - e.x, t.y - e.y) < 2.0)) continue;
+        stairs.x = t.x;
+        stairs.y = t.y;
+        stairs.active = true;
+        return;
+      }
+      stairs.x = player.x + 2;
+      stairs.y = player.y + 2;
+      stairs.active = true;
+    }
+
+    function gainXp(amount) {
+      player.xp += amount;
+      while (player.xp >= player.xpToNext) {
+        player.xp -= player.xpToNext;
+        player.xpLevel += 1;
+        player.xpToNext = Math.round(player.xpToNext * 1.18 + 18);
+        const hasAvailable = !player.hasFireballSkill || !player.hasRapidSkill || !player.hasToughSkill;
+        if (hasAvailable) {
+          choosingSkill = true;
+          gamePaused = true;
+        } else {
+          player.maxHp += 4;
+          player.hp = Math.min(player.maxHp, player.hp + 4);
+        }
+      }
+    }
+
+    function tryPickSkill(index) {
+      if (!choosingSkill) return false;
+      const choice = skillChoices[index];
+      if (!choice) return false;
+      if (choice.id === "fireball" && !player.hasFireballSkill) player.hasFireballSkill = true;
+      else if (choice.id === "rapid" && !player.hasRapidSkill) {
+        player.hasRapidSkill = true;
+        player.fireRateMult *= 0.8;
+      } else if (choice.id === "tough" && !player.hasToughSkill) {
+        player.hasToughSkill = true;
+        player.maxHp = Math.round(player.maxHp * 1.2);
+        player.hp = Math.min(player.maxHp, player.hp + Math.round(player.maxHp * 0.2));
+      } else {
+        return false;
+      }
+      choosingSkill = false;
+      gamePaused = false;
+      return true;
+    }
+
+    function advanceFloor() {
+      dungeonLevel += 1;
+      generateRandomMap();
+      spawnEntities();
+    }
 
     function isWall(x, y) {
       const tx = Math.floor(x);
@@ -296,7 +416,7 @@
     }
 
     function update(dt) {
-      if (gameState !== "playing") return;
+      if (gameState !== "playing" || gamePaused) return;
 
       let forward = 0;
       let strafe = 0;
@@ -314,6 +434,8 @@
 
       player.shootCooldown = Math.max(0, player.shootCooldown - dt);
       player.muzzleFlash = Math.max(0, player.muzzleFlash - dt);
+      player.fireballCooldown = Math.max(0, player.fireballCooldown - dt);
+      if (isMouseDown && document.pointerLockElement === canvas && weaponDefs[player.weaponIndex].id === "smg") shoot();
 
       for (const m of milks) {
         if (!m.taken) {
@@ -338,8 +460,48 @@
         const vx = player.x - e.x;
         const vy = player.y - e.y;
         const d = Math.hypot(vx, vy);
+        const diff = difficultyScale();
 
-        if (d <= enemyAggroRange && d > 0.7) {
+        if (e.kind === "flame" || e.kind === "lightning") {
+          e.shootTimer -= dt;
+          if (d < 3.2) {
+            const ex = e.x - (vx / Math.max(0.001, d)) * enemySpeed * 0.65 * dt;
+            const ey = e.y - (vy / Math.max(0.001, d)) * enemySpeed * 0.65 * dt;
+            if (canMove(ex, e.y, 0.2)) e.x = ex;
+            if (canMove(e.x, ey, 0.2)) e.y = ey;
+          } else if (d > 6.4) {
+            const ex = e.x + (vx / Math.max(0.001, d)) * enemySpeed * 0.55 * dt;
+            const ey = e.y + (vy / Math.max(0.001, d)) * enemySpeed * 0.55 * dt;
+            if (canMove(ex, e.y, 0.2)) e.x = ex;
+            if (canMove(e.x, ey, 0.2)) e.y = ey;
+          } else {
+            e.wanderTimer -= dt;
+            if (e.wanderTimer <= 0) {
+              e.wanderAngle = Math.random() * Math.PI * 2;
+              e.wanderTimer = 0.45 + Math.random() * 1.1;
+            }
+            const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * 0.55 * dt;
+            const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * 0.55 * dt;
+            if (canMove(ex, e.y, 0.2)) e.x = ex;
+            if (canMove(e.x, ey, 0.2)) e.y = ey;
+          }
+
+          if (d < 12 && d > 1.8 && e.shootTimer <= 0) {
+            const isLightning = e.kind === "lightning";
+            enemyProjectiles.push({
+              x: e.x,
+              y: e.y,
+              a: Math.atan2(vy, vx) + (Math.random() - 0.5) * (isLightning ? 0.03 : 0.08),
+              speed: (isLightning ? 6.9 : 4.3) * (1 + (dungeonLevel - 1) * 0.08),
+              life: isLightning ? 1.6 : 2.4,
+              damage: Math.round((isLightning ? 16 : 13) * diff),
+              size: isLightning ? 0.23 : 0.27,
+              type: isLightning ? "lightning" : "flame"
+            });
+            e.shootTimer = (isLightning ? 0.72 : 0.95) + Math.random() * (isLightning ? 0.95 : 1.15);
+          }
+          if (d <= 0.78) player.hp -= (e.kind === "lightning" ? 22 : 18) * diff * dt;
+        } else if (d <= enemyAggroRange && d > 0.7) {
           const ex = e.x + (vx / d) * enemySpeed * dt;
           const ey = e.y + (vy / d) * enemySpeed * dt;
           if (canMove(ex, e.y, 0.2)) e.x = ex;
@@ -347,7 +509,7 @@
           if (canMove(e.x, ey, 0.2)) e.y = ey;
           else e.wanderAngle = Math.random() * Math.PI * 2;
         } else if (d <= 0.7) {
-          player.hp -= 20 * dt;
+          player.hp -= 20 * diff * dt;
         } else {
           e.wanderTimer -= dt;
           if (e.wanderTimer <= 0) {
@@ -371,11 +533,15 @@
         if (isWall(b.x, b.y)) b.life = -1;
         for (const e of enemies) {
           if (e.hp <= 0) continue;
-          if (Math.hypot(e.x - b.x, e.y - b.y) < 0.32) {
-            const hitDamage = Math.min(25, e.hp);
-            e.hp -= 25;
+          if (Math.hypot(e.x - b.x, e.y - b.y) < (b.hitRadius || 0.32)) {
+            const dmg = b.damage || 25;
+            const hitDamage = Math.min(dmg, e.hp);
+            e.hp -= dmg;
             e.hurt = 1;
             player.hp = Math.min(player.maxHp, player.hp + hitDamage * lifestealRatio);
+            if (e.hp <= 0) {
+              gainXp(e.kind === "lightning" ? 32 : e.kind === "flame" ? 22 : 15);
+            }
             b.life = -1;
             break;
           }
@@ -384,11 +550,30 @@
       for (let i = bullets.length - 1; i >= 0; i--) {
         if (bullets[i].life <= 0) bullets.splice(i, 1);
       }
+      for (const p of enemyProjectiles) {
+        p.life -= dt;
+        p.x += Math.cos(p.a) * p.speed * dt;
+        p.y += Math.sin(p.a) * p.speed * dt;
+        if (isWall(p.x, p.y)) {
+          p.life = -1;
+          continue;
+        }
+        if (Math.hypot(player.x - p.x, player.y - p.y) < 0.38) {
+          player.hp -= p.damage;
+          p.life = -1;
+        }
+      }
+      for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+        if (enemyProjectiles[i].life <= 0) enemyProjectiles.splice(i, 1);
+      }
 
       player.hp = Math.max(0, player.hp);
       if (player.hp <= 0) gameState = "lost";
       const collected = milks.filter(m => m.taken).length;
-      if (collected === totalMilk) gameState = "won";
+      if (collected === totalMilk && !stairs.active) placeStairs();
+      if (stairs.active && Math.hypot(player.x - stairs.x, player.y - stairs.y) < 0.62) {
+        advanceFloor();
+      }
     }
 
     function drawBackground() {
@@ -473,8 +658,15 @@
       for (const a of ammoCrates) {
         if (!a.taken) sprites.push({ ...a, type: "ammo" });
       }
+      if (stairs.active) sprites.push({ ...stairs, type: "stairs" });
+      for (const b of bullets) {
+        if (b.life > 0) sprites.push({ ...b, type: "pbullet", btype: b.type || "normal" });
+      }
+      for (const p of enemyProjectiles) {
+        if (p.life > 0) sprites.push({ ...p, type: p.type === "lightning" ? "lball" : "fball" });
+      }
       for (const e of enemies) {
-        if (e.hp > 0) sprites.push({ ...e, type: "enemy", hurt: e.hurt });
+        if (e.hp > 0) sprites.push({ ...e, type: "enemy", hurt: e.hurt, kind: e.kind });
       }
 
       sprites.sort((a, b) => {
@@ -492,7 +684,7 @@
         if (Math.abs(wrapped) > fov * 0.6) continue;
 
         const screenX = (wrapped / fov + 0.5) * w;
-        const spriteScale = s.type === "enemy" ? 0.55 : s.type === "ammo" ? 0.34 : 0.40;
+        const spriteScale = s.type === "enemy" ? 0.55 : s.type === "ammo" ? 0.34 : s.type === "milk" ? 0.40 : s.type === "stairs" ? 0.40 : 0.12;
         const size = Math.min(h * 0.9, (h * spriteScale) / Math.max(dist, 0.1));
         const left = screenX - size / 2;
         const top = h / 2 - size / 2;
@@ -501,7 +693,11 @@
 
         if (s.type === "milk") drawMilkSprite(left, top, size);
         else if (s.type === "ammo") drawAmmoCrateSprite(left, top, size);
-        else drawEnemySprite(left, top, size, s.hurt);
+        else if (s.type === "stairs") drawStairsSprite(left, top, size);
+        else if (s.type === "enemy") drawEnemySprite(left, top, size, s.hurt, s.kind);
+        else if (s.type === "fball") drawFlameBallSprite(left, top, size);
+        else if (s.type === "lball") drawLightningBallSprite(left, top, size);
+        else drawPlayerBulletSprite(left, top, size, s.btype);
       }
 
       ctx.strokeStyle = "#cbd5e1";
@@ -522,7 +718,7 @@
       const depth = size * 0.20;
       const topLift = size * 0.12;
 
-      ctx.fillStyle = "#8ea6bf";
+      ctx.fillStyle = "#78b8ff";
       ctx.beginPath();
       ctx.moveTo(frontX, frontY);
       ctx.lineTo(frontX + depth, frontY - topLift);
@@ -532,15 +728,15 @@
       ctx.fill();
 
       const frontGrad = ctx.createLinearGradient(frontX, frontY, frontX, frontY + frontH);
-      frontGrad.addColorStop(0, "#edf1f5");
-      frontGrad.addColorStop(0.58, "#cfd8e2");
-      frontGrad.addColorStop(1, "#9da9b8");
+      frontGrad.addColorStop(0, "#ffffff");
+      frontGrad.addColorStop(0.58, "#d7f1ff");
+      frontGrad.addColorStop(1, "#8ec5ff");
       ctx.fillStyle = frontGrad;
       ctx.fillRect(frontX, frontY, frontW, frontH);
 
       const sideGrad = ctx.createLinearGradient(frontX + frontW, frontY, frontX + frontW + depth, frontY + frontH);
-      sideGrad.addColorStop(0, "#7a8ea4");
-      sideGrad.addColorStop(1, "#4f647b");
+      sideGrad.addColorStop(0, "#4fa3ff");
+      sideGrad.addColorStop(1, "#1f5fae");
       ctx.fillStyle = sideGrad;
       ctx.beginPath();
       ctx.moveTo(frontX + frontW, frontY);
@@ -550,9 +746,9 @@
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = "#465a71";
+      ctx.fillStyle = "#1f6ad3";
       ctx.fillRect(frontX + frontW * 0.16, frontY + frontH * 0.22, frontW * 0.66, frontH * 0.46);
-      ctx.fillStyle = "#b6c3d0";
+      ctx.fillStyle = "#94d6ff";
       ctx.fillRect(frontX + frontW * 0.24, frontY + frontH * 0.30, frontW * 0.22, frontH * 0.12);
 
       ctx.strokeStyle = "rgba(15, 23, 42, 0.82)";
@@ -606,7 +802,7 @@
       ctx.strokeRect(cx, cy, cw, ch);
     }
 
-    function drawEnemySprite(left, top, size, hurt) {
+    function drawEnemySprite(left, top, size, hurt, kind = "melee") {
       const bodyW = size * 0.82;
       const bodyH = size;
       const bodyX = left;
@@ -616,6 +812,9 @@
       if (hurt > 0) {
         body.addColorStop(0, "#c78186");
         body.addColorStop(1, "#7f474b");
+      } else if (kind === "flame") {
+        body.addColorStop(0, "#cf7d45");
+        body.addColorStop(1, "#7b3f24");
       } else {
         body.addColorStop(0, "#7c8e73");
         body.addColorStop(1, "#4f5d48");
@@ -635,67 +834,173 @@
       ctx.fillStyle = "#c28e8f";
       ctx.fillRect(bodyX + bodyW * 0.34, bodyY + bodyH * 0.58, bodyW * 0.16, bodyH * 0.03);
 
-      ctx.fillStyle = hurt > 0 ? "#a95d5d" : "#5c7155";
+      ctx.fillStyle = hurt > 0 ? "#a95d5d" : (kind === "flame" ? "#a8633d" : "#5c7155");
       ctx.fillRect(bodyX - bodyW * 0.08, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
       ctx.fillRect(bodyX + bodyW, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
+
+      if (kind === "flame") {
+        ctx.fillStyle = "#fca169";
+        ctx.fillRect(bodyX + bodyW * 0.36, bodyY + bodyH * 0.44, bodyW * 0.22, bodyH * 0.09);
+      } else if (kind === "lightning") {
+        ctx.strokeStyle = "#93c5fd";
+        ctx.lineWidth = Math.max(1.2, size * 0.025);
+        ctx.beginPath();
+        ctx.moveTo(bodyX + bodyW * 0.30, bodyY + bodyH * 0.40);
+        ctx.lineTo(bodyX + bodyW * 0.44, bodyY + bodyH * 0.52);
+        ctx.lineTo(bodyX + bodyW * 0.38, bodyY + bodyH * 0.64);
+        ctx.lineTo(bodyX + bodyW * 0.54, bodyY + bodyH * 0.80);
+        ctx.stroke();
+      }
 
       ctx.strokeStyle = "rgba(3, 7, 18, 0.85)";
       ctx.lineWidth = Math.max(1.3, size * 0.02);
       ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
     }
 
+    function drawPlayerBulletSprite(left, top, size, btype = "normal") {
+      const cx = left + size * 0.5;
+      const cy = top + size * 0.5;
+      const r = Math.max(1.5, size * 0.25);
+      const g = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+      if (btype === "fire") {
+        g.addColorStop(0, "rgba(255, 238, 180, 0.96)");
+        g.addColorStop(0.65, "rgba(248, 130, 48, 0.82)");
+        g.addColorStop(1, "rgba(128, 44, 20, 0.22)");
+      } else {
+        g.addColorStop(0, "rgba(220, 235, 255, 0.95)");
+        g.addColorStop(1, "rgba(125, 160, 210, 0.20)");
+      }
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawFlameBallSprite(left, top, size) {
+      const cx = left + size * 0.5;
+      const cy = top + size * 0.5;
+      const r = Math.max(2.5, size * 0.45);
+      const outer = ctx.createRadialGradient(cx, cy, r * 0.2, cx, cy, r);
+      outer.addColorStop(0, "rgba(255, 220, 150, 0.95)");
+      outer.addColorStop(0.55, "rgba(245, 130, 50, 0.80)");
+      outer.addColorStop(1, "rgba(130, 45, 20, 0.25)");
+      ctx.fillStyle = outer;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255, 245, 210, 0.72)";
+      ctx.beginPath();
+      ctx.arc(cx - r * 0.18, cy - r * 0.20, r * 0.30, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawLightningBallSprite(left, top, size) {
+      const cx = left + size * 0.5;
+      const cy = top + size * 0.5;
+      const r = Math.max(2, size * 0.42);
+      const g = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+      g.addColorStop(0, "rgba(230, 248, 255, 0.95)");
+      g.addColorStop(0.6, "rgba(120, 205, 255, 0.82)");
+      g.addColorStop(1, "rgba(40, 90, 180, 0.2)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(210, 240, 255, 0.78)";
+      ctx.lineWidth = Math.max(1, size * 0.08);
+      ctx.beginPath();
+      ctx.moveTo(cx - r * 0.3, cy - r * 0.5);
+      ctx.lineTo(cx + r * 0.1, cy - r * 0.1);
+      ctx.lineTo(cx - r * 0.1, cy + r * 0.15);
+      ctx.lineTo(cx + r * 0.35, cy + r * 0.45);
+      ctx.stroke();
+    }
+
+    function drawStairsSprite(left, top, size) {
+      const w = size * 0.9;
+      const h = size * 0.55;
+      const x = left + size * 0.05;
+      const y = top + size * 0.30;
+      ctx.fillStyle = "#57606f";
+      ctx.fillRect(x, y, w, h);
+      const steps = 5;
+      for (let i = 0; i < steps; i++) {
+        const sy = y + (i / steps) * h;
+        ctx.fillStyle = i % 2 ? "#7b8494" : "#656f7e";
+        ctx.fillRect(x + (i / steps) * w * 0.2, sy, w - (i / steps) * w * 0.2, h / steps - 1);
+      }
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.8)";
+      ctx.lineWidth = Math.max(1.2, size * 0.02);
+      ctx.strokeRect(x, y, w, h);
+    }
+
     function drawWeapon(timeSec) {
       const w = canvas.width;
       const h = canvas.height;
-      const sway = Math.sin(timeSec * 4.4) * 4 + Math.cos(timeSec * 2.2) * 2;
+      const sway = Math.sin(timeSec * 4.0) * 3 + Math.cos(timeSec * 1.9) * 1.5;
       const recoil = player.shootCooldown > 0 ? player.shootCooldown * 28 : 0;
-      const gunW = w * 0.36;
-      const gunH = h * 0.25;
+      const gunW = w * 0.40;
+      const gunH = h * 0.28;
       const gunX = w * 0.5 - gunW * 0.5 + sway;
-      const gunY = h - gunH + 24 + recoil;
+      const gunY = h - gunH + 40 + recoil;
+      const wp = weaponDefs[player.weaponIndex];
 
-      const stock = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
-      stock.addColorStop(0, "#4a3628");
-      stock.addColorStop(1, "#2e2118");
-      ctx.fillStyle = stock;
-      ctx.fillRect(gunX + gunW * 0.08, gunY + gunH * 0.34, gunW * 0.22, gunH * 0.50);
+      function steel(x, y, ww, hh, a = "#6c737a", b = "#2f353b") {
+        const g = ctx.createLinearGradient(x, y, x, y + hh);
+        g.addColorStop(0, a);
+        g.addColorStop(1, b);
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, ww, hh);
+      }
 
-      const receiver = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
-      receiver.addColorStop(0, "#5f646a");
-      receiver.addColorStop(1, "#2d3136");
-      ctx.fillStyle = receiver;
-      ctx.fillRect(gunX + gunW * 0.24, gunY + gunH * 0.25, gunW * 0.52, gunH * 0.43);
+      function wood(x, y, ww, hh) {
+        const g = ctx.createLinearGradient(x, y, x, y + hh);
+        g.addColorStop(0, "#5b4532");
+        g.addColorStop(1, "#312417");
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, ww, hh);
+      }
 
-      const handGuard = ctx.createLinearGradient(gunX, gunY, gunX, gunY + gunH);
-      handGuard.addColorStop(0, "#73797f");
-      handGuard.addColorStop(1, "#3d4247");
-      ctx.fillStyle = handGuard;
-      ctx.fillRect(gunX + gunW * 0.50, gunY + gunH * 0.16, gunW * 0.28, gunH * 0.18);
+      const bodyW = wp.id === "shotgun" ? gunW * 0.26 : wp.id === "sniper" ? gunW * 0.20 : gunW * 0.24;
+      const bodyH = gunH * 0.54;
+      const bodyX = gunX + gunW * 0.5 - bodyW * 0.5;
+      const bodyY = gunY + gunH * 0.36;
+      const barrelW = wp.id === "sniper" ? bodyW * 0.20 : wp.id === "shotgun" ? bodyW * 0.30 : bodyW * 0.24;
+      const barrelH = wp.id === "sniper" ? gunH * 0.70 : wp.id === "shotgun" ? gunH * 0.52 : gunH * 0.60;
+      const barrelX = gunX + gunW * 0.5 - barrelW * 0.5;
+      const barrelY = gunY - barrelH * 0.58;
 
-      ctx.fillStyle = "#23272c";
-      ctx.fillRect(gunX + gunW * 0.56, gunY - gunH * 0.18, gunW * 0.12, gunH * 0.50);
-      ctx.fillStyle = "#181c20";
-      ctx.fillRect(gunX + gunW * 0.60, gunY - gunH * 0.24, gunW * 0.04, gunH * 0.08);
+      if (wp.id === "shotgun") wood(bodyX, bodyY, bodyW, bodyH);
+      else steel(bodyX, bodyY, bodyW, bodyH, "#747b83", "#353b42");
+      steel(barrelX, barrelY, barrelW, barrelH, "#808890", "#333a42");
 
-      ctx.fillStyle = "#3f444a";
-      ctx.fillRect(gunX + gunW * 0.40, gunY + gunH * 0.08, gunW * 0.16, gunH * 0.09);
+      if (wp.id === "sniper") {
+        steel(gunX + gunW * 0.5 - bodyW * 0.55, gunY + gunH * 0.27, bodyW * 1.1, gunH * 0.12, "#7b838c", "#373d45");
+        ctx.fillStyle = "#101419";
+        ctx.fillRect(gunX + gunW * 0.5 - bodyW * 0.18, gunY + gunH * 0.29, bodyW * 0.36, gunH * 0.08);
+      }
+      if (wp.id === "smg") {
+        steel(gunX + gunW * 0.5 - bodyW * 0.60, gunY + gunH * 0.43, bodyW * 1.2, gunH * 0.09, "#707880", "#323840");
+      }
+      if (wp.id === "rifle") {
+        wood(gunX + gunW * 0.5 - bodyW * 0.62, gunY + gunH * 0.51, bodyW * 1.24, gunH * 0.10);
+      }
+
+      ctx.fillStyle = "#20262c";
+      ctx.fillRect(gunX + gunW * 0.5 - bodyW * 0.28, gunY + gunH * 0.56, bodyW * 0.56, gunH * 0.30);
+      ctx.fillStyle = "#13181d";
+      ctx.fillRect(gunX + gunW * 0.5 - bodyW * 0.18, gunY + gunH * 0.62, bodyW * 0.36, gunH * 0.20);
       ctx.fillStyle = "#0f1216";
-      ctx.fillRect(gunX + gunW * 0.45, gunY + gunH * 0.05, gunW * 0.06, gunH * 0.03);
-
-      ctx.fillStyle = "#2d3238";
-      ctx.fillRect(gunX + gunW * 0.30, gunY + gunH * 0.56, gunW * 0.10, gunH * 0.36);
-      ctx.fillStyle = "#11151a";
-      ctx.fillRect(gunX + gunW * 0.315, gunY + gunH * 0.60, gunW * 0.07, gunH * 0.29);
-
-      ctx.strokeStyle = "rgba(208, 214, 221, 0.35)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(gunX + gunW * 0.24, gunY + gunH * 0.25, gunW * 0.52, gunH * 0.43);
-      ctx.strokeRect(gunX + gunW * 0.08, gunY + gunH * 0.34, gunW * 0.22, gunH * 0.50);
+      ctx.fillRect(gunX + gunW * 0.5 - bodyW * 0.09, gunY + gunH * 0.08, bodyW * 0.18, gunH * 0.03);
+      ctx.strokeStyle = "rgba(205, 213, 221, 0.26)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
+      ctx.strokeRect(barrelX, barrelY, barrelW, barrelH);
 
       if (player.muzzleFlash > 0) {
-        const f = player.muzzleFlash / 0.12;
-        const fx = gunX + gunW * 0.62;
-        const fy = gunY - gunH * 0.20;
+        const f = player.muzzleFlash / Math.max(0.01, wp.muzzle);
+        const fx = gunX + gunW * 0.5;
+        const fy = barrelY - gunH * 0.03;
         ctx.fillStyle = `rgba(240, 220, 150, ${0.36 * f})`;
         ctx.beginPath();
         ctx.moveTo(fx, fy - 18 * f);
@@ -744,11 +1049,21 @@
           ctx.fillRect(cx - 1.2, cy - 0.55, 2.4, 1.1);
         }
       }
+      if (stairs.active) {
+        const sx = pad + stairs.x * cell;
+        const sy = pad + stairs.y * cell;
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillRect(sx - 2.2, sy - 2.2, 4.4, 4.4);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.fillRect(sx - 1.5, sy - 1.5, 3.0, 0.8);
+        ctx.fillRect(sx - 0.8, sy - 0.3, 2.3, 0.8);
+        ctx.fillRect(sx - 0.1, sy + 0.9, 1.6, 0.8);
+      }
       for (const e of enemies) {
         if (e.hp > 0) {
           const ex = pad + e.x * cell;
           const ey = pad + e.y * cell;
-          ctx.fillStyle = "#ef4444";
+          ctx.fillStyle = e.kind === "lightning" ? "#60a5fa" : e.kind === "flame" ? "#f97316" : "#ef4444";
           ctx.beginPath();
           ctx.arc(ex, ey, 2.4, 0, Math.PI * 2);
           ctx.fill();
@@ -772,13 +1087,34 @@
     }
 
     function drawOverlay() {
-      if (gameState === "playing") return;
+      if (gameState === "playing" && !choosingSkill) return;
+      if (choosingSkill) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#e5e7eb";
+        ctx.font = "bold 44px Trebuchet MS";
+        ctx.fillText(`Level Up! Choose a Skill`, canvas.width / 2, canvas.height / 2 - 120);
+        ctx.font = "bold 24px Trebuchet MS";
+        for (let i = 0; i < skillChoices.length; i++) {
+          const c = skillChoices[i];
+          const unlocked = (c.id === "fireball" && player.hasFireballSkill) || (c.id === "rapid" && player.hasRapidSkill) || (c.id === "tough" && player.hasToughSkill);
+          const yy = canvas.height / 2 - 35 + i * 74;
+          ctx.fillStyle = unlocked ? "#64748b" : "#f8fafc";
+          ctx.fillText(`${c.key}. ${c.label}`, canvas.width / 2, yy);
+          ctx.font = "20px Trebuchet MS";
+          ctx.fillStyle = unlocked ? "#64748b" : "#cbd5e1";
+          ctx.fillText(unlocked ? "Already picked" : c.desc, canvas.width / 2, yy + 28);
+          ctx.font = "bold 24px Trebuchet MS";
+        }
+        return;
+      }
       ctx.fillStyle = "rgba(0, 0, 0, 0.58)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.textAlign = "center";
       ctx.fillStyle = "#f8fafc";
       ctx.font = "bold 52px Trebuchet MS";
-      ctx.fillText(gameState === "won" ? "You got the milk!" : "You got shredded!", canvas.width / 2, canvas.height / 2 - 10);
+      ctx.fillText("You got shredded!", canvas.width / 2, canvas.height / 2 - 10);
       ctx.font = "24px Trebuchet MS";
       ctx.fillStyle = "#cbd5e1";
       ctx.fillText("Refresh page to play again", canvas.width / 2, canvas.height / 2 + 36);
@@ -804,47 +1140,90 @@
     function drawHudBars() {
       const collected = milks.filter(m => m.taken).length;
       const aliveEnemies = enemies.filter(e => e.hp > 0).length;
+      const wp = weaponDefs[player.weaponIndex];
       const x = 16;
       const w = Math.min(320, canvas.width * 0.34);
       const h = 24;
       const gap = 8;
-      const totalHudH = (h + gap) * 4 + 44;
+      const totalHudH = (h + gap) * 5 + 44;
       const y = Math.max(12, canvas.height - totalHudH - 12);
 
       drawStatBar(x, y, w, h, collected, totalMilk, "#3b82f6", "Milk", "🥛");
       drawStatBar(x, y + (h + gap) * 1, w, h, player.hp, player.maxHp, "#ef4444", "Health", "❤️");
       drawStatBar(x, y + (h + gap) * 2, w, h, player.ammo, player.maxAmmo, "#f59e0b", "Ammo", "🔫");
-      drawStatBar(x, y + (h + gap) * 3, w, h, aliveEnemies, targetEnemyCount, "#22c55e", "Enemies", "👾");
+      drawStatBar(x, y + (h + gap) * 3, w, h, aliveEnemies, levelEnemyTarget(), "#22c55e", "Enemies", "👾");
+      drawStatBar(x, y + (h + gap) * 4, w, h, player.xp, player.xpToNext, "#8b5cf6", "XP", "✨");
 
       ctx.fillStyle = "rgba(10, 14, 22, 0.52)";
-      ctx.fillRect(x, y + (h + gap) * 4, w, 44);
+      ctx.fillRect(x, y + (h + gap) * 5, w, 44);
       ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
-      ctx.strokeRect(x, y + (h + gap) * 4, w, 44);
+      ctx.strokeRect(x, y + (h + gap) * 5, w, 44);
       ctx.fillStyle = "#e2e8f0";
       ctx.font = "bold 14px Trebuchet MS";
       ctx.textAlign = "left";
       const stateText = gameState === "playing" ? "Playing" : gameState === "won" ? "Won" : "Lost";
-      ctx.fillText(`🎮 State: ${stateText}`, x + 8, y + (h + gap) * 4 + 16);
-      ctx.fillText("⌨️ WASD move  🖱️ LMB shoot", x + 8, y + (h + gap) * 4 + 38);
+      ctx.fillText(`🎮 ${stateText}  |  ${wp.emoji} ${wp.name}  |  Floor ${dungeonLevel}  |  Lvl ${player.xpLevel}`, x + 8, y + (h + gap) * 5 + 16);
+      ctx.fillText("⌨️ WASD  🖱️ LMB (hold SMG)  🔢 1-4  🔥 F", x + 8, y + (h + gap) * 5 + 38);
+    }
+
+    function setWeapon(index) {
+      const maxIdx = weaponDefs.length - 1;
+      player.weaponIndex = Math.max(0, Math.min(maxIdx, index));
     }
 
     function shoot() {
-      if (gameState !== "playing" || player.shootCooldown > 0 || player.ammo <= 0) return;
+      const wp = weaponDefs[player.weaponIndex];
+      if (gameState !== "playing" || gamePaused || player.shootCooldown > 0 || player.ammo < wp.ammoCost) return;
+
+      for (let i = 0; i < wp.pellets; i++) {
+        const spreadOffset = (Math.random() - 0.5) * wp.spread * 2;
+        bullets.push({
+          x: player.x,
+          y: player.y,
+          a: player.a + spreadOffset,
+          speed: wp.speed,
+          life: wp.life,
+          damage: wp.damage,
+          hitRadius: wp.hitRadius
+        });
+      }
+      player.ammo -= wp.ammoCost;
+      player.shootCooldown = wp.cooldown;
+      player.muzzleFlash = wp.muzzle;
+    }
+
+    function castFireball() {
+      if (gameState !== "playing" || gamePaused || !player.hasFireballSkill || player.fireballCooldown > 0) return;
       bullets.push({
         x: player.x,
         y: player.y,
         a: player.a,
-        speed: 8.2,
-        life: 1.2
+        speed: 7.4,
+        life: 1.5,
+        damage: 40,
+        hitRadius: 0.38,
+        type: "fire"
       });
-      player.ammo -= 1;
-      player.shootCooldown = 0.25;
-      player.muzzleFlash = 0.12;
+      player.fireballCooldown = 1.05;
+      player.muzzleFlash = 0.15;
     }
 
     window.addEventListener("keydown", (e) => {
       const key = e.key.toLowerCase();
+      if (choosingSkill) {
+        if (key === "1") tryPickSkill(0);
+        if (key === "2") tryPickSkill(1);
+        if (key === "3") tryPickSkill(2);
+        return;
+      }
       keys.add(key);
+      if (key === "1") setWeapon(0);
+      if (key === "2") setWeapon(1);
+      if (key === "3") setWeapon(2);
+      if (key === "4") setWeapon(3);
+      if (key === "q") setWeapon((player.weaponIndex - 1 + weaponDefs.length) % weaponDefs.length);
+      if (key === "e") setWeapon((player.weaponIndex + 1) % weaponDefs.length);
+      if (key === "f") castFireball();
     });
     window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 
@@ -856,17 +1235,31 @@
 
     window.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
+      isMouseDown = true;
       if (document.pointerLockElement !== canvas) {
         canvas.requestPointerLock();
         return;
       }
       shoot();
     });
+    window.addEventListener("mouseup", (e) => {
+      if (e.button === 0) isMouseDown = false;
+    });
+    window.addEventListener("blur", () => { isMouseDown = false; });
+    document.addEventListener("pointerlockchange", () => {
+      if (document.pointerLockElement !== canvas) isMouseDown = false;
+    });
 
     window.addEventListener("mousemove", (e) => {
       if (document.pointerLockElement !== canvas || gameState !== "playing") return;
       player.a += e.movementX * mouseSensitivity;
     });
+
+    window.addEventListener("wheel", (e) => {
+      if (document.pointerLockElement !== canvas || choosingSkill) return;
+      const dir = e.deltaY > 0 ? 1 : -1;
+      setWeapon((player.weaponIndex + dir + weaponDefs.length) % weaponDefs.length);
+    }, { passive: true });
 
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
