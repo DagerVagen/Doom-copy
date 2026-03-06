@@ -63,7 +63,21 @@
     const baseEnemyCount = 14;
     const baseMilkCount = 12;
     const baseAmmoCrateCount = 10;
-    const lifestealRatio = 0.32;
+    const baseLifestealRatio = 0.32;
+    const enemyDefs = {
+      melee: { hp: 46, xp: 15, touchDps: 20, ranged: false, speed: 1.0 },
+      stalker: { hp: 34, xp: 18, touchDps: 24, ranged: false, speed: 1.34 },
+      brute: { hp: 88, xp: 30, touchDps: 32, ranged: false, speed: 0.72 },
+      flame: { hp: 55, xp: 22, touchDps: 18, ranged: true, speed: 0.95 },
+      lightning: { hp: 70, xp: 32, touchDps: 22, ranged: true, speed: 1.08 },
+      poison: { hp: 62, xp: 28, touchDps: 17, ranged: true, speed: 0.9 }
+    };
+    const floorThemes = [
+      { name: "Basement Hollows", roomTarget: 22, roomMin: 6, roomMax: 12, hallMin: 2, hallMax: 3, extraLinks: 10, pillarChance: 0.18 },
+      { name: "Catacomb Grid", roomTarget: 26, roomMin: 6, roomMax: 11, hallMin: 2, hallMax: 3, extraLinks: 13, pillarChance: 0.26 },
+      { name: "Foundry Warrens", roomTarget: 28, roomMin: 5, roomMax: 10, hallMin: 2, hallMax: 4, extraLinks: 16, pillarChance: 0.34 },
+      { name: "Abyssal Labyrinth", roomTarget: 31, roomMin: 5, roomMax: 9, hallMin: 2, hallMax: 4, extraLinks: 18, pillarChance: 0.4 }
+    ];
     const weaponDefs = [
       { id: "rifle", name: "Rifle", emoji: "🔫", ammoCost: 1, pellets: 1, spread: 0.005, cooldown: 0.19, damage: 28, speed: 9.2, life: 1.3, hitRadius: 0.30, muzzle: 0.10 },
       { id: "smg", name: "SMG", emoji: "🧨", ammoCost: 1, pellets: 1, spread: 0.024, cooldown: 0.075, damage: 14, speed: 8.8, life: 1.05, hitRadius: 0.28, muzzle: 0.08 },
@@ -88,13 +102,29 @@
       ammo: 24,
       weaponIndex: 0,
       fireRateMult: 1,
+      damageMult: 1,
+      lifestealBonus: 0,
+      damageReduction: 0,
+      ammoPickupMult: 1,
+      enemySlowPower: 0,
+      fireballDamageMult: 1,
+      fireballCooldownMult: 1,
       fireballCooldown: 0,
       xp: 0,
       xpLevel: 1,
       xpToNext: 70,
-      hasFireballSkill: false,
-      hasRapidSkill: false,
-      hasToughSkill: false,
+      floorName: floorThemes[0].name,
+      skills: {
+        fireball: false,
+        rapid: false,
+        tough: false,
+        overcharge: false,
+        siphon: false,
+        scavenger: false,
+        frost: false,
+        inferno: false,
+        bulwark: false
+      },
       shootCooldown: 0,
       muzzleFlash: 0
     };
@@ -105,11 +135,18 @@
     const bullets = [];
     const enemyProjectiles = [];
     const stairs = { x: 0, y: 0, active: false };
-    const skillChoices = [
-      { id: "fireball", key: "1", label: "Fireball Cast", desc: "Press F to launch fireball" },
-      { id: "rapid", key: "2", label: "Rapid Trigger", desc: "20% faster weapon fire rate" },
-      { id: "tough", key: "3", label: "Hardened Body", desc: "20% more max HP immediately" }
+    const skillTree = [
+      { id: "rapid", label: "Rapid Trigger", desc: "20% faster weapon fire rate", requires: [], row: 0, col: 0, icon: "R" },
+      { id: "fireball", label: "Fireball Cast", desc: "Press F to launch fireball", requires: [], row: 0, col: 1, icon: "F" },
+      { id: "tough", label: "Hardened Body", desc: "20% more max HP immediately", requires: [], row: 0, col: 2, icon: "T" },
+      { id: "overcharge", label: "Overcharge", desc: "+18% bullet damage", requires: ["rapid"], row: 1, col: 0, icon: "D" },
+      { id: "siphon", label: "Blood Siphon", desc: "+12% lifesteal", requires: ["fireball"], row: 1, col: 1, icon: "V" },
+      { id: "scavenger", label: "Scavenger", desc: "+40% ammo from crates", requires: ["tough"], row: 1, col: 2, icon: "A" },
+      { id: "frost", label: "Cryo Rounds", desc: "Hits slow enemies by 25%", requires: ["overcharge"], row: 2, col: 0, icon: "C" },
+      { id: "inferno", label: "Inferno Core", desc: "Fireball damage +40%, cooldown -20%", requires: ["siphon"], row: 2, col: 1, icon: "I" },
+      { id: "bulwark", label: "Bulwark", desc: "Take 15% less damage", requires: ["scavenger"], row: 2, col: 2, icon: "B" }
     ];
+    let selectableSkills = [];
     let floorTiles = [];
     let wallGrid = [];
     let rooms = [];
@@ -117,6 +154,57 @@
 
     function randInt(min, max) {
       return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function hasSkill(id) {
+      return !!player.skills[id];
+    }
+
+    function getFloorTheme() {
+      const idx = (dungeonLevel - 1) % floorThemes.length;
+      const tier = Math.floor((dungeonLevel - 1) / floorThemes.length);
+      return { ...floorThemes[idx], tier };
+    }
+
+    function getAvailableSkills() {
+      return skillTree.filter(s => !hasSkill(s.id) && s.requires.every(hasSkill));
+    }
+
+    function chooseSkillOptions() {
+      const available = getAvailableSkills();
+      if (available.length <= 6) return available;
+      const shuffled = [...available];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = randInt(0, i);
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      return shuffled.slice(0, 6);
+    }
+
+    function applySkill(id) {
+      if (hasSkill(id)) return false;
+      player.skills[id] = true;
+      if (id === "fireball") return true;
+      if (id === "rapid") player.fireRateMult *= 0.8;
+      if (id === "tough") {
+        player.maxHp = Math.round(player.maxHp * 1.2);
+        player.hp = Math.min(player.maxHp, player.hp + Math.round(player.maxHp * 0.2));
+      }
+      if (id === "overcharge") player.damageMult *= 1.18;
+      if (id === "siphon") player.lifestealBonus += 0.12;
+      if (id === "scavenger") player.ammoPickupMult *= 1.4;
+      if (id === "frost") player.enemySlowPower = Math.max(player.enemySlowPower, 0.25);
+      if (id === "inferno") {
+        player.fireballDamageMult *= 1.4;
+        player.fireballCooldownMult *= 0.8;
+      }
+      if (id === "bulwark") player.damageReduction = Math.min(0.45, player.damageReduction + 0.15);
+      return true;
+    }
+
+    function dealDamageToPlayer(rawAmount) {
+      const reduced = rawAmount * (1 - player.damageReduction);
+      player.hp -= reduced;
     }
 
     function rectsOverlap(a, b, margin = 1) {
@@ -153,8 +241,8 @@
       }
     }
 
-    function addRoomPillars(room) {
-      if (room.w < 9 || room.h < 9) return;
+    function addRoomPillars(room, chance = 0.25) {
+      if (room.w < 9 || room.h < 9 || Math.random() > chance) return;
       for (let py = room.y + 2; py < room.y + room.h - 2; py += 3) {
         for (let px = room.x + 2; px < room.x + room.w - 2; px += 3) {
           if (Math.abs(px - room.cx) <= 1 && Math.abs(py - room.cy) <= 1) continue;
@@ -164,12 +252,19 @@
     }
 
     function generateRandomMap() {
+      const theme = getFloorTheme();
+      const roomGoal = Math.min(40, theme.roomTarget + theme.tier * 3);
+      const roomTryCount = 300 + roomGoal * 18;
+      const minRoom = Math.max(5, theme.roomMin - Math.floor(theme.tier * 0.3));
+      const maxRoom = Math.min(14, theme.roomMax + Math.floor(theme.tier * 0.35));
+      player.floorName = theme.name;
+
       wallGrid = Array.from({ length: worldH }, () => Array(worldW).fill(1));
       rooms = [];
 
-      for (let i = 0; i < 280 && rooms.length < 24; i++) {
-        const rw = randInt(6, 13);
-        const rh = randInt(6, 12);
+      for (let i = 0; i < roomTryCount && rooms.length < roomGoal; i++) {
+        const rw = randInt(minRoom, maxRoom);
+        const rh = randInt(minRoom, maxRoom);
         const rx = randInt(1, worldW - rw - 2);
         const ry = randInt(1, worldH - rh - 2);
         const room = {
@@ -188,13 +283,13 @@
       for (let i = 1; i < rooms.length; i++) {
         const a = rooms[i - 1];
         const b = rooms[i];
-        carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(2, 3));
+        carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(theme.hallMin, theme.hallMax));
       }
 
-      for (let i = 0; i < 10 && rooms.length > 2; i++) {
+      for (let i = 0; i < theme.extraLinks + theme.tier * 2 && rooms.length > 2; i++) {
         const a = rooms[randInt(0, rooms.length - 1)];
         const b = rooms[randInt(0, rooms.length - 1)];
-        if (a !== b) carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(2, 3));
+        if (a !== b) carveCorridor(a.cx, a.cy, b.cx, b.cy, randInt(theme.hallMin, theme.hallMax));
       }
 
       if (rooms.length === 0) {
@@ -203,7 +298,7 @@
         rooms.push(fallback);
       }
 
-      for (const room of rooms) addRoomPillars(room);
+      for (const room of rooms) addRoomPillars(room, theme.pillarChance + theme.tier * 0.03);
 
       floorTiles = [];
       for (let y = 0; y < worldH; y++) {
@@ -235,24 +330,41 @@
     }
 
     function pickEnemyKind() {
-      if (dungeonLevel <= 1) return "melee";
-      if (dungeonLevel === 2) return Math.random() < 0.38 ? "flame" : "melee";
+      if (dungeonLevel <= 1) return Math.random() < 0.2 ? "stalker" : "melee";
+      if (dungeonLevel === 2) {
+        const r = Math.random();
+        if (r < 0.45) return "melee";
+        if (r < 0.72) return "stalker";
+        return "flame";
+      }
+      if (dungeonLevel === 3) {
+        const r = Math.random();
+        if (r < 0.34) return "melee";
+        if (r < 0.56) return "stalker";
+        if (r < 0.8) return "flame";
+        return "brute";
+      }
       const r = Math.random();
-      if (r < 0.30) return "lightning";
-      if (r < 0.62) return "flame";
+      if (r < 0.20) return "lightning";
+      if (r < 0.41) return "flame";
+      if (r < 0.58) return "poison";
+      if (r < 0.75) return "brute";
+      if (r < 0.9) return "stalker";
       return "melee";
     }
 
     function createEnemy(x, y) {
       const kind = pickEnemyKind();
       const scale = difficultyScale();
-      const baseHp = kind === "lightning" ? 70 : kind === "flame" ? 55 : 46;
+      const def = enemyDefs[kind] || enemyDefs.melee;
       return {
         x,
         y,
         kind,
-        hp: Math.round(baseHp * scale),
+        hp: Math.round(def.hp * scale),
         hurt: 0,
+        slowTimer: 0,
+        chargeTimer: 0.6 + Math.random() * 1.2,
         wanderAngle: Math.random() * Math.PI * 2,
         wanderTimer: 0.6 + Math.random() * 1.6,
         shootTimer: 0.7 + Math.random() * 1.4
@@ -338,8 +450,8 @@
         player.xp -= player.xpToNext;
         player.xpLevel += 1;
         player.xpToNext = Math.round(player.xpToNext * 1.18 + 18);
-        const hasAvailable = !player.hasFireballSkill || !player.hasRapidSkill || !player.hasToughSkill;
-        if (hasAvailable) {
+        selectableSkills = chooseSkillOptions();
+        if (selectableSkills.length > 0) {
           choosingSkill = true;
           gamePaused = true;
         } else {
@@ -351,19 +463,12 @@
 
     function tryPickSkill(index) {
       if (!choosingSkill) return false;
-      const choice = skillChoices[index];
+      const choice = selectableSkills[index];
       if (!choice) return false;
-      if (choice.id === "fireball" && !player.hasFireballSkill) player.hasFireballSkill = true;
-      else if (choice.id === "rapid" && !player.hasRapidSkill) {
-        player.hasRapidSkill = true;
-        player.fireRateMult *= 0.8;
-      } else if (choice.id === "tough" && !player.hasToughSkill) {
-        player.hasToughSkill = true;
-        player.maxHp = Math.round(player.maxHp * 1.2);
-        player.hp = Math.min(player.maxHp, player.hp + Math.round(player.maxHp * 0.2));
-      } else {
+      if (!applySkill(choice.id)) {
         return false;
       }
+      selectableSkills = [];
       choosingSkill = false;
       gamePaused = false;
       return true;
@@ -448,7 +553,7 @@
           const d = Math.hypot(crate.x - player.x, crate.y - player.y);
           if (d < 0.5) {
             crate.taken = true;
-            player.ammo = Math.min(player.maxAmmo, player.ammo + crate.amount);
+            player.ammo = Math.min(player.maxAmmo, player.ammo + Math.round(crate.amount * player.ammoPickupMult));
           }
         }
       }
@@ -456,22 +561,26 @@
       for (const e of enemies) {
         if (e.hp <= 0) continue;
         e.hurt = Math.max(0, e.hurt - dt * 2);
+        e.slowTimer = Math.max(0, e.slowTimer - dt);
 
         const vx = player.x - e.x;
         const vy = player.y - e.y;
         const d = Math.hypot(vx, vy);
         const diff = difficultyScale();
+        const def = enemyDefs[e.kind] || enemyDefs.melee;
+        const slowFactor = e.slowTimer > 0 ? (1 - player.enemySlowPower) : 1;
+        const moveMul = def.speed * slowFactor;
 
-        if (e.kind === "flame" || e.kind === "lightning") {
+        if (def.ranged) {
           e.shootTimer -= dt;
           if (d < 3.2) {
-            const ex = e.x - (vx / Math.max(0.001, d)) * enemySpeed * 0.65 * dt;
-            const ey = e.y - (vy / Math.max(0.001, d)) * enemySpeed * 0.65 * dt;
+            const ex = e.x - (vx / Math.max(0.001, d)) * enemySpeed * moveMul * 0.65 * dt;
+            const ey = e.y - (vy / Math.max(0.001, d)) * enemySpeed * moveMul * 0.65 * dt;
             if (canMove(ex, e.y, 0.2)) e.x = ex;
             if (canMove(e.x, ey, 0.2)) e.y = ey;
           } else if (d > 6.4) {
-            const ex = e.x + (vx / Math.max(0.001, d)) * enemySpeed * 0.55 * dt;
-            const ey = e.y + (vy / Math.max(0.001, d)) * enemySpeed * 0.55 * dt;
+            const ex = e.x + (vx / Math.max(0.001, d)) * enemySpeed * moveMul * 0.55 * dt;
+            const ey = e.y + (vy / Math.max(0.001, d)) * enemySpeed * moveMul * 0.55 * dt;
             if (canMove(ex, e.y, 0.2)) e.x = ex;
             if (canMove(e.x, ey, 0.2)) e.y = ey;
           } else {
@@ -480,36 +589,68 @@
               e.wanderAngle = Math.random() * Math.PI * 2;
               e.wanderTimer = 0.45 + Math.random() * 1.1;
             }
-            const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * 0.55 * dt;
-            const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * 0.55 * dt;
+            const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * moveMul * 0.55 * dt;
+            const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * moveMul * 0.55 * dt;
             if (canMove(ex, e.y, 0.2)) e.x = ex;
             if (canMove(e.x, ey, 0.2)) e.y = ey;
           }
 
           if (d < 12 && d > 1.8 && e.shootTimer <= 0) {
             const isLightning = e.kind === "lightning";
+            const isPoison = e.kind === "poison";
             enemyProjectiles.push({
               x: e.x,
               y: e.y,
-              a: Math.atan2(vy, vx) + (Math.random() - 0.5) * (isLightning ? 0.03 : 0.08),
-              speed: (isLightning ? 6.9 : 4.3) * (1 + (dungeonLevel - 1) * 0.08),
-              life: isLightning ? 1.6 : 2.4,
-              damage: Math.round((isLightning ? 16 : 13) * diff),
-              size: isLightning ? 0.23 : 0.27,
-              type: isLightning ? "lightning" : "flame"
+              a: Math.atan2(vy, vx) + (Math.random() - 0.5) * (isLightning ? 0.03 : isPoison ? 0.06 : 0.08),
+              speed: (isLightning ? 6.9 : isPoison ? 4.9 : 4.3) * (1 + (dungeonLevel - 1) * 0.08),
+              life: isLightning ? 1.6 : isPoison ? 2.1 : 2.4,
+              damage: Math.round((isLightning ? 16 : isPoison ? 14 : 13) * diff),
+              size: isLightning ? 0.23 : isPoison ? 0.26 : 0.27,
+              type: isLightning ? "lightning" : isPoison ? "poison" : "flame"
             });
-            e.shootTimer = (isLightning ? 0.72 : 0.95) + Math.random() * (isLightning ? 0.95 : 1.15);
+            e.shootTimer = (isLightning ? 0.72 : isPoison ? 0.86 : 0.95) + Math.random() * (isLightning ? 0.95 : 1.05);
           }
-          if (d <= 0.78) player.hp -= (e.kind === "lightning" ? 22 : 18) * diff * dt;
+          if (d <= 0.78) dealDamageToPlayer(def.touchDps * diff * dt);
+        } else if (e.kind === "stalker") {
+          e.chargeTimer -= dt;
+          if (d <= enemyAggroRange + 1.7 && d > 0.68) {
+            const dash = e.chargeTimer <= 0 ? 1.95 : 1;
+            if (dash > 1) e.chargeTimer = 0.9 + Math.random() * 1.5;
+            const ex = e.x + (vx / d) * enemySpeed * moveMul * dash * dt;
+            const ey = e.y + (vy / d) * enemySpeed * moveMul * dash * dt;
+            if (canMove(ex, e.y, 0.2)) e.x = ex;
+            if (canMove(e.x, ey, 0.2)) e.y = ey;
+          } else if (d <= 0.68) {
+            dealDamageToPlayer(def.touchDps * diff * dt);
+          } else {
+            e.wanderTimer -= dt;
+            if (e.wanderTimer <= 0) {
+              e.wanderAngle = Math.random() * Math.PI * 2;
+              e.wanderTimer = 0.5 + Math.random() * 1.1;
+            }
+            const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * moveMul * dt;
+            const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * moveMul * dt;
+            if (canMove(ex, e.y, 0.2)) e.x = ex;
+            if (canMove(e.x, ey, 0.2)) e.y = ey;
+          }
+        } else if (e.kind === "brute") {
+          if (d <= enemyAggroRange + 0.8 && d > 0.74) {
+            const ex = e.x + (vx / d) * enemySpeed * moveMul * 0.85 * dt;
+            const ey = e.y + (vy / d) * enemySpeed * moveMul * 0.85 * dt;
+            if (canMove(ex, e.y, 0.24)) e.x = ex;
+            if (canMove(e.x, ey, 0.24)) e.y = ey;
+          } else if (d <= 0.74) {
+            dealDamageToPlayer(def.touchDps * diff * dt);
+          }
         } else if (d <= enemyAggroRange && d > 0.7) {
-          const ex = e.x + (vx / d) * enemySpeed * dt;
-          const ey = e.y + (vy / d) * enemySpeed * dt;
+          const ex = e.x + (vx / d) * enemySpeed * moveMul * dt;
+          const ey = e.y + (vy / d) * enemySpeed * moveMul * dt;
           if (canMove(ex, e.y, 0.2)) e.x = ex;
           else e.wanderAngle = Math.random() * Math.PI * 2;
           if (canMove(e.x, ey, 0.2)) e.y = ey;
           else e.wanderAngle = Math.random() * Math.PI * 2;
         } else if (d <= 0.7) {
-          player.hp -= 20 * diff * dt;
+          dealDamageToPlayer(def.touchDps * diff * dt);
         } else {
           e.wanderTimer -= dt;
           if (e.wanderTimer <= 0) {
@@ -517,8 +658,8 @@
             e.wanderTimer = 0.7 + Math.random() * 2.1;
           }
           e.wanderAngle += (Math.random() - 0.5) * 0.9 * dt;
-          const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * dt;
-          const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * dt;
+          const ex = e.x + Math.cos(e.wanderAngle) * enemyWanderSpeed * moveMul * dt;
+          const ey = e.y + Math.sin(e.wanderAngle) * enemyWanderSpeed * moveMul * dt;
           if (canMove(ex, e.y, 0.2)) e.x = ex;
           else e.wanderAngle += Math.PI * (0.4 + Math.random() * 0.3);
           if (canMove(e.x, ey, 0.2)) e.y = ey;
@@ -538,9 +679,10 @@
             const hitDamage = Math.min(dmg, e.hp);
             e.hp -= dmg;
             e.hurt = 1;
-            player.hp = Math.min(player.maxHp, player.hp + hitDamage * lifestealRatio);
+            if (player.enemySlowPower > 0) e.slowTimer = Math.max(e.slowTimer, 0.8);
+            player.hp = Math.min(player.maxHp, player.hp + hitDamage * (baseLifestealRatio + player.lifestealBonus));
             if (e.hp <= 0) {
-              gainXp(e.kind === "lightning" ? 32 : e.kind === "flame" ? 22 : 15);
+              gainXp((enemyDefs[e.kind] || enemyDefs.melee).xp);
             }
             b.life = -1;
             break;
@@ -559,7 +701,7 @@
           continue;
         }
         if (Math.hypot(player.x - p.x, player.y - p.y) < 0.38) {
-          player.hp -= p.damage;
+          dealDamageToPlayer(p.damage);
           p.life = -1;
         }
       }
@@ -663,7 +805,12 @@
         if (b.life > 0) sprites.push({ ...b, type: "pbullet", btype: b.type || "normal" });
       }
       for (const p of enemyProjectiles) {
-        if (p.life > 0) sprites.push({ ...p, type: p.type === "lightning" ? "lball" : "fball" });
+        if (p.life > 0) {
+          sprites.push({
+            ...p,
+            type: p.type === "lightning" ? "lball" : p.type === "poison" ? "pball" : "fball"
+          });
+        }
       }
       for (const e of enemies) {
         if (e.hp > 0) sprites.push({ ...e, type: "enemy", hurt: e.hurt, kind: e.kind });
@@ -697,6 +844,7 @@
         else if (s.type === "enemy") drawEnemySprite(left, top, size, s.hurt, s.kind);
         else if (s.type === "fball") drawFlameBallSprite(left, top, size);
         else if (s.type === "lball") drawLightningBallSprite(left, top, size);
+        else if (s.type === "pball") drawPoisonBallSprite(left, top, size);
         else drawPlayerBulletSprite(left, top, size, s.btype);
       }
 
@@ -808,51 +956,86 @@
       const bodyX = left;
       const bodyY = top;
 
+      const palette = {
+        melee: ["#8a947d", "#4f5d48", "#7b8e73"],
+        stalker: ["#8b77a8", "#4b3b63", "#cebaf0"],
+        brute: ["#8d6b4b", "#4d341f", "#cfb08d"],
+        flame: ["#cf7d45", "#7b3f24", "#ffd1a8"],
+        lightning: ["#65a9d6", "#28527b", "#d6f1ff"],
+        poison: ["#4ca768", "#245c36", "#ccf6d2"]
+      };
+      const p = palette[kind] || palette.melee;
       const body = ctx.createLinearGradient(bodyX, bodyY, bodyX, bodyY + bodyH);
       if (hurt > 0) {
         body.addColorStop(0, "#c78186");
         body.addColorStop(1, "#7f474b");
-      } else if (kind === "flame") {
-        body.addColorStop(0, "#cf7d45");
-        body.addColorStop(1, "#7b3f24");
       } else {
-        body.addColorStop(0, "#7c8e73");
-        body.addColorStop(1, "#4f5d48");
+        body.addColorStop(0, p[0]);
+        body.addColorStop(1, p[1]);
       }
+
+      ctx.fillStyle = "rgba(2, 6, 14, 0.35)";
+      ctx.beginPath();
+      ctx.ellipse(bodyX + bodyW * 0.54, bodyY + bodyH * 1.02, bodyW * 0.58, bodyH * 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+
       ctx.fillStyle = body;
       ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
 
       ctx.fillStyle = "#0f172a";
-      ctx.fillRect(bodyX + bodyW * 0.18, bodyY + bodyH * 0.22, bodyW * 0.18, bodyH * 0.14);
-      ctx.fillRect(bodyX + bodyW * 0.58, bodyY + bodyH * 0.22, bodyW * 0.18, bodyH * 0.14);
-      ctx.fillStyle = hurt > 0 ? "#f1e7e8" : "#e6eaee";
-      ctx.fillRect(bodyX + bodyW * 0.22, bodyY + bodyH * 0.26, bodyW * 0.08, bodyH * 0.05);
-      ctx.fillRect(bodyX + bodyW * 0.62, bodyY + bodyH * 0.26, bodyW * 0.08, bodyH * 0.05);
+      ctx.fillRect(bodyX + bodyW * 0.16, bodyY + bodyH * 0.2, bodyW * 0.19, bodyH * 0.15);
+      ctx.fillRect(bodyX + bodyW * 0.58, bodyY + bodyH * 0.2, bodyW * 0.19, bodyH * 0.15);
+      ctx.fillStyle = hurt > 0 ? "#fce7ea" : p[2];
+      ctx.fillRect(bodyX + bodyW * 0.21, bodyY + bodyH * 0.25, bodyW * 0.08, bodyH * 0.05);
+      ctx.fillRect(bodyX + bodyW * 0.63, bodyY + bodyH * 0.25, bodyW * 0.08, bodyH * 0.05);
 
       ctx.fillStyle = "#111827";
-      ctx.fillRect(bodyX + bodyW * 0.28, bodyY + bodyH * 0.55, bodyW * 0.28, bodyH * 0.09);
-      ctx.fillStyle = "#c28e8f";
-      ctx.fillRect(bodyX + bodyW * 0.34, bodyY + bodyH * 0.58, bodyW * 0.16, bodyH * 0.03);
+      ctx.fillRect(bodyX + bodyW * 0.26, bodyY + bodyH * 0.52, bodyW * 0.32, bodyH * 0.1);
+      ctx.fillStyle = kind === "poison" ? "#6ee7b7" : "#e5d1c0";
+      ctx.fillRect(bodyX + bodyW * 0.34, bodyY + bodyH * 0.57, bodyW * 0.15, bodyH * 0.03);
 
-      ctx.fillStyle = hurt > 0 ? "#a95d5d" : (kind === "flame" ? "#a8633d" : "#5c7155");
-      ctx.fillRect(bodyX - bodyW * 0.08, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
-      ctx.fillRect(bodyX + bodyW, bodyY + bodyH * 0.40, bodyW * 0.08, bodyH * 0.34);
+      ctx.fillStyle = hurt > 0 ? "#b75f66" : p[1];
+      ctx.fillRect(bodyX - bodyW * 0.08, bodyY + bodyH * 0.38, bodyW * 0.08, bodyH * 0.36);
+      ctx.fillRect(bodyX + bodyW, bodyY + bodyH * 0.38, bodyW * 0.08, bodyH * 0.36);
 
       if (kind === "flame") {
-        ctx.fillStyle = "#fca169";
-        ctx.fillRect(bodyX + bodyW * 0.36, bodyY + bodyH * 0.44, bodyW * 0.22, bodyH * 0.09);
-      } else if (kind === "lightning") {
-        ctx.strokeStyle = "#93c5fd";
-        ctx.lineWidth = Math.max(1.2, size * 0.025);
+        ctx.fillStyle = "#ffd199";
         ctx.beginPath();
-        ctx.moveTo(bodyX + bodyW * 0.30, bodyY + bodyH * 0.40);
+        ctx.moveTo(bodyX + bodyW * 0.5, bodyY + bodyH * 0.40);
+        ctx.lineTo(bodyX + bodyW * 0.61, bodyY + bodyH * 0.56);
+        ctx.lineTo(bodyX + bodyW * 0.50, bodyY + bodyH * 0.52);
+        ctx.lineTo(bodyX + bodyW * 0.41, bodyY + bodyH * 0.60);
+        ctx.closePath();
+        ctx.fill();
+      } else if (kind === "lightning") {
+        ctx.strokeStyle = "#c8ecff";
+        ctx.lineWidth = Math.max(1.2, size * 0.024);
+        ctx.beginPath();
+        ctx.moveTo(bodyX + bodyW * 0.29, bodyY + bodyH * 0.40);
         ctx.lineTo(bodyX + bodyW * 0.44, bodyY + bodyH * 0.52);
-        ctx.lineTo(bodyX + bodyW * 0.38, bodyY + bodyH * 0.64);
-        ctx.lineTo(bodyX + bodyW * 0.54, bodyY + bodyH * 0.80);
+        ctx.lineTo(bodyX + bodyW * 0.39, bodyY + bodyH * 0.63);
+        ctx.lineTo(bodyX + bodyW * 0.56, bodyY + bodyH * 0.80);
+        ctx.stroke();
+      } else if (kind === "poison") {
+        ctx.fillStyle = "#a7f3d0";
+        ctx.beginPath();
+        ctx.arc(bodyX + bodyW * 0.51, bodyY + bodyH * 0.45, bodyW * 0.09, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (kind === "brute") {
+        ctx.fillStyle = "#d6bfa4";
+        ctx.fillRect(bodyX + bodyW * 0.16, bodyY + bodyH * 0.03, bodyW * 0.10, bodyH * 0.17);
+        ctx.fillRect(bodyX + bodyW * 0.68, bodyY + bodyH * 0.03, bodyW * 0.10, bodyH * 0.17);
+      } else if (kind === "stalker") {
+        ctx.strokeStyle = "#d8c6ff";
+        ctx.lineWidth = Math.max(1, size * 0.018);
+        ctx.beginPath();
+        ctx.moveTo(bodyX + bodyW * 0.18, bodyY + bodyH * 0.85);
+        ctx.lineTo(bodyX + bodyW * 0.33, bodyY + bodyH * 0.74);
+        ctx.lineTo(bodyX + bodyW * 0.46, bodyY + bodyH * 0.84);
         ctx.stroke();
       }
 
-      ctx.strokeStyle = "rgba(3, 7, 18, 0.85)";
+      ctx.strokeStyle = "rgba(3, 7, 18, 0.86)";
       ctx.lineWidth = Math.max(1.3, size * 0.02);
       ctx.strokeRect(bodyX, bodyY, bodyW, bodyH);
     }
@@ -914,6 +1097,24 @@
       ctx.lineTo(cx - r * 0.1, cy + r * 0.15);
       ctx.lineTo(cx + r * 0.35, cy + r * 0.45);
       ctx.stroke();
+    }
+
+    function drawPoisonBallSprite(left, top, size) {
+      const cx = left + size * 0.5;
+      const cy = top + size * 0.5;
+      const r = Math.max(2, size * 0.43);
+      const g = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+      g.addColorStop(0, "rgba(220, 255, 226, 0.95)");
+      g.addColorStop(0.6, "rgba(90, 210, 126, 0.82)");
+      g.addColorStop(1, "rgba(28, 108, 58, 0.20)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(214, 255, 220, 0.86)";
+      ctx.beginPath();
+      ctx.arc(cx - r * 0.16, cy - r * 0.16, r * 0.24, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     function drawStairsSprite(left, top, size) {
@@ -1063,7 +1264,15 @@
         if (e.hp > 0) {
           const ex = pad + e.x * cell;
           const ey = pad + e.y * cell;
-          ctx.fillStyle = e.kind === "lightning" ? "#60a5fa" : e.kind === "flame" ? "#f97316" : "#ef4444";
+          const enemyColor = {
+            melee: "#ef4444",
+            stalker: "#c084fc",
+            brute: "#f59e0b",
+            flame: "#f97316",
+            lightning: "#60a5fa",
+            poison: "#4ade80"
+          };
+          ctx.fillStyle = enemyColor[e.kind] || "#ef4444";
           ctx.beginPath();
           ctx.arc(ex, ey, 2.4, 0, Math.PI * 2);
           ctx.fill();
@@ -1091,21 +1300,98 @@
       if (choosingSkill) {
         ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const panelW = Math.min(canvas.width * 0.94, 980);
+        const panelH = Math.min(canvas.height * 0.9, 650);
+        const panelX = (canvas.width - panelW) / 2;
+        const panelY = (canvas.height - panelH) / 2;
+        ctx.fillStyle = "rgba(7, 12, 22, 0.90)";
+        ctx.fillRect(panelX, panelY, panelW, panelH);
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.55)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(panelX, panelY, panelW, panelH);
+
         ctx.textAlign = "center";
         ctx.fillStyle = "#e5e7eb";
-        ctx.font = "bold 44px Trebuchet MS";
-        ctx.fillText(`Level Up! Choose a Skill`, canvas.width / 2, canvas.height / 2 - 120);
-        ctx.font = "bold 24px Trebuchet MS";
-        for (let i = 0; i < skillChoices.length; i++) {
-          const c = skillChoices[i];
-          const unlocked = (c.id === "fireball" && player.hasFireballSkill) || (c.id === "rapid" && player.hasRapidSkill) || (c.id === "tough" && player.hasToughSkill);
-          const yy = canvas.height / 2 - 35 + i * 74;
-          ctx.fillStyle = unlocked ? "#64748b" : "#f8fafc";
-          ctx.fillText(`${c.key}. ${c.label}`, canvas.width / 2, yy);
-          ctx.font = "20px Trebuchet MS";
-          ctx.fillStyle = unlocked ? "#64748b" : "#cbd5e1";
-          ctx.fillText(unlocked ? "Already picked" : c.desc, canvas.width / 2, yy + 28);
-          ctx.font = "bold 24px Trebuchet MS";
+        ctx.font = "bold 38px Trebuchet MS";
+        ctx.fillText("Level Up Skill Tree", canvas.width / 2, panelY + 54);
+        ctx.font = "18px Trebuchet MS";
+        ctx.fillStyle = "#a5b4fc";
+        ctx.fillText("Pick one highlighted node. Locked nodes need their parent first.", canvas.width / 2, panelY + 82);
+
+        const nodeR = Math.max(34, Math.min(54, panelW * 0.047));
+        const colW = panelW / 3.2;
+        const rowH = (panelH - 220) / 2.2;
+        const nodePos = new Map();
+        const pickIndexById = new Map(selectableSkills.map((s, i) => [s.id, i]));
+        for (const s of skillTree) {
+          nodePos.set(s.id, {
+            x: panelX + panelW * 0.18 + s.col * colW,
+            y: panelY + 156 + s.row * rowH
+          });
+        }
+
+        ctx.lineWidth = 3;
+        for (const s of skillTree) {
+          const to = nodePos.get(s.id);
+          for (const req of s.requires) {
+            const from = nodePos.get(req);
+            if (!from) continue;
+            const lit = hasSkill(req) && (hasSkill(s.id) || pickIndexById.has(s.id));
+            ctx.strokeStyle = lit ? "rgba(99, 229, 255, 0.75)" : "rgba(100, 116, 139, 0.35)";
+            ctx.beginPath();
+            ctx.moveTo(from.x, from.y + nodeR * 0.72);
+            ctx.lineTo(to.x, to.y - nodeR * 0.72);
+            ctx.stroke();
+          }
+        }
+
+        for (const s of skillTree) {
+          const p = nodePos.get(s.id);
+          const owned = hasSkill(s.id);
+          const pickIdx = pickIndexById.get(s.id);
+          const available = typeof pickIdx === "number";
+          const locked = !owned && !available;
+          const base = owned ? "#22c55e" : available ? "#38bdf8" : "#64748b";
+          const border = owned ? "#bbf7d0" : available ? "#bae6fd" : "#475569";
+
+          ctx.fillStyle = base;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, nodeR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = border;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+
+          ctx.fillStyle = locked ? "#cbd5e1" : "#ffffff";
+          ctx.font = `bold ${Math.round(nodeR * 0.54)}px Trebuchet MS`;
+          ctx.fillText(s.icon, p.x, p.y + 7);
+
+          if (available) {
+            ctx.fillStyle = "#f59e0b";
+            ctx.fillRect(p.x + nodeR * 0.45, p.y - nodeR * 0.95, nodeR * 0.74, nodeR * 0.50);
+            ctx.fillStyle = "#111827";
+            ctx.font = `bold ${Math.round(nodeR * 0.34)}px Trebuchet MS`;
+            ctx.fillText(`${pickIdx + 1}`, p.x + nodeR * 0.82, p.y - nodeR * 0.58);
+          }
+
+          ctx.font = "bold 15px Trebuchet MS";
+          ctx.fillStyle = owned ? "#dcfce7" : available ? "#e0f2fe" : "#94a3b8";
+          ctx.fillText(s.label, p.x, p.y + nodeR + 22);
+        }
+
+        ctx.textAlign = "left";
+        ctx.font = "16px Trebuchet MS";
+        ctx.fillStyle = "#e2e8f0";
+        ctx.fillText("Available picks:", panelX + 28, panelY + panelH - 84);
+        ctx.font = "15px Trebuchet MS";
+        for (let i = 0; i < selectableSkills.length; i++) {
+          const s = selectableSkills[i];
+          const col = i < 3 ? 0 : 1;
+          const row = i % 3;
+          const tx = panelX + 28 + col * (panelW * 0.48);
+          const ty = panelY + panelH - 58 + row * 20;
+          ctx.fillStyle = "#cbd5e1";
+          ctx.fillText(`${i + 1}. ${s.label} - ${s.desc}`, tx, ty);
         }
         return;
       }
@@ -1162,8 +1448,8 @@
       ctx.font = "bold 14px Trebuchet MS";
       ctx.textAlign = "left";
       const stateText = gameState === "playing" ? "Playing" : gameState === "won" ? "Won" : "Lost";
-      ctx.fillText(`🎮 ${stateText}  |  ${wp.emoji} ${wp.name}  |  Floor ${dungeonLevel}  |  Lvl ${player.xpLevel}`, x + 8, y + (h + gap) * 5 + 16);
-      ctx.fillText("⌨️ WASD  🖱️ LMB (hold SMG)  🔢 1-4  🔥 F", x + 8, y + (h + gap) * 5 + 38);
+      ctx.fillText(`🎮 ${stateText}  |  ${wp.emoji} ${wp.name}  |  Floor ${dungeonLevel}: ${player.floorName}  |  Lvl ${player.xpLevel}`, x + 8, y + (h + gap) * 5 + 16);
+      ctx.fillText("⌨️ WASD  🖱️ LMB (hold SMG)  🔢 1-4  🔥 F  |  Skill-up: 1-9", x + 8, y + (h + gap) * 5 + 38);
     }
 
     function setWeapon(index) {
@@ -1183,37 +1469,38 @@
           a: player.a + spreadOffset,
           speed: wp.speed,
           life: wp.life,
-          damage: wp.damage,
+          damage: wp.damage * player.damageMult,
           hitRadius: wp.hitRadius
         });
       }
       player.ammo -= wp.ammoCost;
-      player.shootCooldown = wp.cooldown;
+      player.shootCooldown = wp.cooldown * player.fireRateMult;
       player.muzzleFlash = wp.muzzle;
     }
 
     function castFireball() {
-      if (gameState !== "playing" || gamePaused || !player.hasFireballSkill || player.fireballCooldown > 0) return;
+      if (gameState !== "playing" || gamePaused || !hasSkill("fireball") || player.fireballCooldown > 0) return;
       bullets.push({
         x: player.x,
         y: player.y,
         a: player.a,
         speed: 7.4,
         life: 1.5,
-        damage: 40,
+        damage: 40 * player.damageMult * player.fireballDamageMult,
         hitRadius: 0.38,
         type: "fire"
       });
-      player.fireballCooldown = 1.05;
+      player.fireballCooldown = 1.05 * player.fireballCooldownMult;
       player.muzzleFlash = 0.15;
     }
 
     window.addEventListener("keydown", (e) => {
       const key = e.key.toLowerCase();
       if (choosingSkill) {
-        if (key === "1") tryPickSkill(0);
-        if (key === "2") tryPickSkill(1);
-        if (key === "3") tryPickSkill(2);
+        if (key >= "1" && key <= "9") {
+          const idx = Number(key) - 1;
+          tryPickSkill(idx);
+        }
         return;
       }
       keys.add(key);
